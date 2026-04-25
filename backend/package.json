@@ -16,6 +16,7 @@
     "jsonwebtoken": "^9.0.2",
     "iptv-playlist-parser": "^0.15.2",
     "pg": "^8.11.3",
-    "redis": "^4.6.10"
+    "redis": "^4.6.10",
+    "sqlite3": "^5.1.7"
   }
 }
