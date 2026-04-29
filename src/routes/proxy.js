@@ -7,34 +7,69 @@ const router  = express.Router();
 
 // ── DoH Resolver (igual ao m3uParserService) ─────────────────────────────────
 const resolveDoh = async (hostname) => {
-    const cleanHost = hostname.trim().split(':')[0];
-    if (/^\d+\.\d+\.\d+\.\d+$/.test(cleanHost)) return cleanHost;
+    const cleanHost = hostname.trim().split(':')[0]; 
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(cleanHost)) return cleanHost; 
+
+    console.log(`[PROXY DNS] Resolvendo: ${cleanHost} via DoH...`);
 
     const providers = [
-        { url: `https://1.1.1.1/dns-query?name=${cleanHost}&type=A`, headers: { accept: 'application/dns-json' } },
-        { url: `https://dns.google/resolve?name=${cleanHost}&type=A`, headers: { accept: 'application/json' } }
+        { url: `https://1.1.1.1/dns-query?name=${cleanHost}&type=A`, headers: { 'accept': 'application/dns-json' } },
+        { url: `https://dns.google/resolve?name=${cleanHost}&type=A`, headers: { 'accept': 'application/json' } }
     ];
-    for (const p of providers) {
+
+    for (const provider of providers) {
         try {
-            const r = await axios.get(p.url, {
-                headers: p.headers, timeout: 5000,
-                httpAgent: new http.Agent(), httpsAgent: new https.Agent()
+            const response = await axios.get(provider.url, { 
+                headers: provider.headers,
+                timeout: 3000,
+                httpAgent: new http.Agent(),
+                httpsAgent: new https.Agent()
             });
-            const a = r.data?.Answer?.find(x => x.type === 1);
-            if (a) { console.log(`[PROXY DoH] ✅ ${cleanHost} → ${a.data}`); return a.data; }
-        } catch (_) {}
+
+            const data = response.data;
+            if (data && data.Answer) {
+                const firstA = data.Answer.find(a => a.type === 1);
+                if (firstA) {
+                    console.log(`[PROXY DNS] ✅ DoH (${provider.url.includes('1.1.1.1') ? 'Cloudflare' : 'Google'}): ${cleanHost} -> ${firstA.data}`);
+                    return firstA.data;
+                }
+            }
+        } catch (error) {
+            console.warn(`[PROXY DNS] ❌ DoH Falhou (${provider.url.includes('1.1.1.1') ? 'Cloudflare' : 'Google'}): ${error.message}`);
+        }
     }
     return null;
 };
 
 const customLookup = (hostname, options, callback) => {
-    resolveDoh(hostname).then(ip => {
-        if (ip) return callback(null, [{ address: ip, family: 4 }]);
+    resolveDoh(hostname).then(dohIp => {
+        if (dohIp) {
+            if (options.all) {
+                return callback(null, [{ address: dohIp, family: 4 }]);
+            }
+            return callback(null, dohIp, 4);
+        }
+
+        console.log(`[PROXY DNS] ⚠️ DoH falhou para ${hostname}, tentando DNS do sistema...`);
+
         dns.resolve4(hostname, (err, addrs) => {
-            if (err || !addrs?.length) return dns.lookup(hostname, options, callback);
-            callback(null, [{ address: addrs[0], family: 4 }]);
+            if (err || !addrs?.length) {
+                return dns.lookup(hostname, options, (lErr, address, family) => {
+                    if (lErr) console.error(`[PROXY DNS] ❌ Falha total para ${hostname}: ${lErr.message}`);
+                    callback(lErr, address, family);
+                });
+            }
+            
+            console.log(`[PROXY DNS] ✅ Sistema (resolve4): ${hostname} -> ${addrs[0]}`);
+            if (options.all) {
+                return callback(null, [{ address: addrs[0], family: 4 }]);
+            }
+            callback(null, addrs[0], 4);
         });
-    }).catch(() => dns.lookup(hostname, options, callback));
+    }).catch(err => {
+        console.error(`[PROXY DNS] ❌ Erro inesperado em customLookup para ${hostname}:`, err.message);
+        dns.lookup(hostname, options, callback);
+    });
 };
 
 const proxyAgents = {
@@ -93,12 +128,20 @@ router.get('/stream', async (req, res) => {
         // Determinar se é manifest M3U8
         const isM3u8 = finalTarget.includes('.m3u8') || finalTarget.includes('type=m3u8');
 
+        // Tenta extrair a origem de forma segura
+        let origin = '';
+        try {
+            origin = new URL(finalTarget).origin;
+        } catch (e) {
+            origin = 'http://localhost';
+        }
+
         const commonHeaders = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
             'Accept': '*/*',
             'Connection': 'keep-alive',
-            'Referer': new URL(finalTarget).origin + '/',
-            'Origin': new URL(finalTarget).origin
+            'Referer': origin + '/',
+            'Origin': origin
         };
 
         if (isM3u8) {
@@ -177,9 +220,52 @@ router.get('/stream', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('[PROXY ERROR URL]', req.query.url);
-        console.error('[PROXY ERROR MSG]', error.message);
-        res.status(error.response?.status || 500).send('Proxy Stream Error');
+        console.error(`[PROXY STREAM ERROR] URL: ${req.query.url}`);
+        
+        if (error.response) {
+            console.error(`[PROXY STREAM ERROR] Remote Server responded with: ${error.response.status}`);
+            console.error(`[PROXY STREAM ERROR] Remote Headers:`, error.response.headers);
+            return res.status(error.response.status).send(`Proxy Error from Remote: ${error.response.statusText}`);
+        }
+
+        console.error(`[PROXY STREAM ERROR] MSG: ${error.message}`);
+        
+        if (error.code === 'ECONNABORTED') {
+            return res.status(504).send('Proxy Timeout - Servidor remoto demorou muito a responder');
+        }
+        
+        if (error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN') {
+            return res.status(502).send('Proxy DNS Error - Não foi possível encontrar o servidor da lista');
+        }
+
+        res.status(500).send(`Proxy Stream Error: ${error.message}`);
+    }
+});
+
+// GET /api/proxy/image?url=...  — Proxy para imagens para evitar Mixed Content (HTTP em site HTTPS)
+router.get('/image', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.status(400).send('URL is required');
+
+    try {
+        const response = await axios({
+            method: 'GET',
+            url: targetUrl,
+            responseType: 'stream',
+            timeout: 10000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'image/*'
+            }
+        });
+
+        res.setHeader('Content-Type', response.headers['content-type'] || 'image/png');
+        res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache por 24h
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        response.data.pipe(res);
+    } catch (error) {
+        // Se falhar, redireciona para um placeholder ou retorna erro silencioso
+        res.status(200).send(''); 
     }
 });
 

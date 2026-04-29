@@ -3,13 +3,27 @@ const axios = require('axios');
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '6f926673a3ad4681602052402120e24c'; // Chave de teste pública comum
 const BASE_URL = 'https://api.themoviedb.org/3';
 
+const cleanTitle = (title) => {
+    if (!title) return '';
+    return title
+        .replace(/\d{4}/g, '') // Remove anos (2023, 2024, etc)
+        .replace(/\(.*\)/g, '') // Remove conteúdo entre parênteses
+        .replace(/\[.*\]/g, '') // Remove conteúdo entre colchetes
+        .replace(/4k|1080p|720p|hdtv|s\d+e\d+|dual|legendado|dublado|multi/gi, '') // Remove tags comuns
+        .replace(/\s+/g, ' ') // Normaliza espaços
+        .trim();
+};
+
 exports.searchMedia = async (title, type = 'movie') => {
     try {
+        const cleanedTitle = cleanTitle(title);
+        console.log(`[TMDB SEARCH] Original: "${title}" | Cleaned: "${cleanedTitle}"`);
+
         const searchPath = type === 'series' ? 'tv' : 'movie';
         const response = await axios.get(`${BASE_URL}/search/${searchPath}`, {
             params: {
                 api_key: TMDB_API_KEY,
-                query: title,
+                query: cleanedTitle,
                 language: 'pt-BR'
             }
         });
@@ -42,5 +56,42 @@ exports.searchMedia = async (title, type = 'movie') => {
     } catch (error) {
         console.error('[TMDB ERROR]', error.message);
         return null;
+    }
+};
+exports.getSeriesEpisodes = async (tmdbId) => {
+    try {
+        // 1. Pegar detalhes da série para saber o número de temporadas
+        const detailResponse = await axios.get(`${BASE_URL}/tv/${tmdbId}`, {
+            params: { api_key: TMDB_API_KEY, language: 'pt-BR' }
+        });
+
+        const episodesMap = {};
+        const seasons = detailResponse.data.seasons || [];
+
+        // Buscar episódios de cada temporada (em paralelo para performance)
+        const promises = seasons.map(s => 
+            axios.get(`${BASE_URL}/tv/${tmdbId}/season/${s.season_number}`, {
+                params: { api_key: TMDB_API_KEY, language: 'pt-BR' }
+            }).catch(() => null)
+        );
+
+        const results = await Promise.all(promises);
+
+        results.forEach(res => {
+            if (res && res.data && res.data.episodes) {
+                res.data.episodes.forEach(ep => {
+                    episodesMap[`${ep.season_number}x${ep.episode_number}`] = {
+                        name: ep.name,
+                        overview: ep.overview,
+                        stillPath: ep.still_path ? `https://image.tmdb.org/t/p/w300${ep.still_path}` : null
+                    };
+                });
+            }
+        });
+
+        return episodesMap;
+    } catch (error) {
+        console.error('[TMDB EPISODES ERROR]', error.message);
+        return {};
     }
 };
