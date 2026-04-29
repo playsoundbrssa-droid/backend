@@ -2,17 +2,19 @@ import React from 'react';
 import { FiPlay, FiHeart, FiDownload } from 'react-icons/fi';
 import { usePlaylistStore } from '../../stores/usePlaylistStore';
 import { usePlayerStore } from '../../stores/usePlayerStore';
-import { useProgressStore } from '../../stores/useProgressStore';
 import toast from 'react-hot-toast';
+import { getProxyImageUrl } from '../../services/api';
+import { usePlaylistManagerStore } from '../../stores/usePlaylistManagerStore';
+import { useNavigate } from 'react-router-dom';
 
 export default function MediaCard({ item, type, playlist = [] }) {
     const { addFavorite, removeFavorite, favorites } = usePlaylistStore();
     const { setCurrentStream } = usePlayerStore();
     const { setSelectedMediaDetails } = usePlaylistStore();
-    const { getProgress } = useProgressStore();
+    const { getActivePlaylist } = usePlaylistManagerStore();
+    const navigate = useNavigate();
     
-    const progress = getProgress(item.id);
-    const progressPercent = progress ? Math.min(100, Math.max(0, (progress.currentTime / (progress.duration || 1)) * 100)) : 0;
+    const activePlaylist = getActivePlaylist();
     
     const isFavorite = favorites.some(f => f.id === item.id);
 
@@ -29,6 +31,13 @@ export default function MediaCard({ item, type, playlist = [] }) {
 
     const handleDownload = (e) => {
         e.stopPropagation();
+        
+        if (!activePlaylist) {
+            toast.error('Adicione uma lista nas configurações para fazer downloads.');
+            navigate('/settings');
+            return;
+        }
+
         const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
         const rawUrl = item.streamUrl || item.url;
         
@@ -46,6 +55,12 @@ export default function MediaCard({ item, type, playlist = [] }) {
     };
 
     const handlePlay = () => {
+        if (!activePlaylist) {
+            toast.error('Você precisa de uma lista ativa para assistir.');
+            navigate('/settings');
+            return;
+        }
+
         if (type === 'movie' || type === 'series') {
             setSelectedMediaDetails({ ...item, type });
         } else {
@@ -55,23 +70,33 @@ export default function MediaCard({ item, type, playlist = [] }) {
 
     const isVOD = type === 'movie' || type === 'series';
 
+    const [imgSrc, setImgSrc] = React.useState(() => getProxyImageUrl(item.logo));
+    const [imgError, setImgError] = React.useState(false);
+
+    const handleImgError = () => {
+        setImgError(true);
+    };
+
     return (
         <div 
             onClick={handlePlay}
-            className="group relative bg-surface/30 backdrop-blur-md border border-white/5 rounded-2xl overflow-hidden hover:border-primary/50 transition-all duration-300 active:scale-[0.98] md:hover:scale-[1.02] cursor-pointer shadow-lg hover:shadow-primary/20 flex flex-col h-full"
+            className="group relative bg-surface/30 border border-white/5 rounded-2xl overflow-hidden hover:border-primary/50 transition-all duration-300 active:scale-[0.98] md:hover:scale-[1.02] cursor-pointer shadow-lg hover:shadow-primary/20 flex flex-col h-full"
         >
             {/* Poster / Logo Area */}
             <div className={`${isVOD ? 'aspect-[2/3]' : 'aspect-[16/9]'} relative bg-black/40 flex items-center justify-center shrink-0`}>
-                {item.logo ? (
+                {imgSrc && !imgError ? (
                     <img 
-                        src={item.logo} 
+                        src={imgSrc} 
                         alt={item.name} 
                         className={`w-full h-full ${isVOD ? 'object-cover' : 'object-contain p-4'} group-hover:scale-110 transition-transform duration-500`}
                         loading="lazy"
                         decoding="async"
+                        onError={handleImgError}
                     />
                 ) : (
-                    <div className="text-gray-600 text-4xl font-bold uppercase">{item.name.charAt(0)}</div>
+                    <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-surface to-black text-primary/40 text-4xl font-black uppercase select-none">
+                        {item.name ? item.name.charAt(0) : '?'}
+                    </div>
                 )}
                 
                 {/* Overlay on hover */}
@@ -112,16 +137,6 @@ export default function MediaCard({ item, type, playlist = [] }) {
                 <div className="absolute bottom-3 left-3 px-2 py-1 rounded-md bg-black/60 backdrop-blur-md border border-white/10 text-[10px] uppercase font-bold text-gray-400">
                     {item.group}
                 </div>
-
-                {/* Watch Progress Bar */}
-                {progressPercent > 0 && (
-                    <div className="absolute bottom-0 left-0 w-full h-1 bg-white/10">
-                        <div 
-                            className="h-full bg-primary shadow-[0_0_10px_rgba(108,92,231,0.5)] transition-all duration-300"
-                            style={{ width: `${progressPercent}%` }}
-                        />
-                    </div>
-                )}
             </div>
 
             {/* Info Area */}

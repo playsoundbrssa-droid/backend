@@ -1,63 +1,45 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import Hls from 'hls.js';
 import mpegjs from 'mpegts.js';
-
-// Desativar logs verbosos do mpegts.js (MSEController, etc.)
-if (typeof window !== 'undefined' && mpegjs.LoggingControl) {
-    mpegjs.LoggingControl.enableAll = false;
-    mpegjs.LoggingControl.enableError = true;
-    mpegjs.LoggingControl.enableWarn = true;
-}
-
-import { usePlayerStore } from '../../stores/usePlayerStore';
-import { usePlaylistStore } from '../../stores/usePlaylistStore';
 import { 
     FiX, FiPlay, FiPause, FiMaximize, FiVolume2, 
     FiVolumeX, FiRefreshCw, FiChevronLeft, FiChevronRight, 
-    FiHeart, FiDownload, FiSkipBack, FiSkipForward, FiMenu,
-    FiShare2, FiMessageSquare, FiClock, FiAirplay, FiMinimize2, FiLayers, FiChevronDown
+    FiHeart, FiMinimize2, FiSkipBack, FiSkipForward,
+    FiSettings, FiDownload, FiAirplay, FiSquare, FiMonitor,
+    FiRotateCcw, FiRotateCw, FiLogOut
 } from 'react-icons/fi';
-import { organizeBySeasons } from '../../utils/seasonOrganizer';
-import toast from 'react-hot-toast';
-import { api } from '../../services/api';
+import { usePlayerStore } from '../../stores/usePlayerStore';
+import { usePlaylistStore } from '../../stores/usePlaylistStore';
 import { usePlaylistManagerStore } from '../../stores/usePlaylistManagerStore';
-import { useProgressStore } from '../../stores/useProgressStore';
-import { statsApi } from '../../api/stats';
+import api from '../../services/api';
+import toast from 'react-hot-toast';
 
 export default function VideoPlayer() {
     const videoRef = useRef(null);
     const hlsRef = useRef(null);
     const mpegPlayerRef = useRef(null);
+    const containerRef = useRef(null);
     
-    // Stores
-    const { currentStream, setCurrentStream, isPlaying, togglePlay, playNext, playPrev, playlist } = usePlayerStore();
+    const { currentStream, setCurrentStream, isPlaying, togglePlay, playNext, playPrev } = usePlayerStore();
     const { favorites, addFavorite, removeFavorite } = usePlaylistStore();
-    const { saveProgress, getProgress } = useProgressStore();
-    const { getActivePlaylist } = usePlaylistManagerStore();
     
-    // UI State
     const [showControls, setShowControls] = useState(true);
     const [isBuffering, setIsBuffering] = useState(true);
     const [error, setError] = useState(null);
+    const [volume, setVolume] = useState(parseFloat(localStorage.getItem('player_volume')) || 1);
     const [isMuted, setIsMuted] = useState(false);
-    const [volume, setVolume] = useState(1);
-    const [epgInfo, setEpgInfo] = useState(null);
-    const [showFullEpg, setShowFullEpg] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
     const [useProxy, setUseProxy] = useState(false);
-    const [showComments, setShowComments] = useState(false);
-    const [comments, setComments] = useState([]);
-    const [newComment, setNewComment] = useState('');
-    const [isMinimized, setIsMinimized] = useState(false);
-    const [isFullscreen, setIsFullscreen] = useState(false);
-    const [showSeasons, setShowSeasons] = useState(false);
-    const [selectedSeason, setSelectedSeason] = useState(1);
-    const [position, setPosition] = useState({ x: 24, y: 24 }); // de baixo para cima, de direita para esquerda
+    const [playbackRate, setPlaybackRate] = useState(1);
+    const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+    const [showQualityMenu, setShowQualityMenu] = useState(false);
+    const [airplayAvailable, setAirplayAvailable] = useState(false);
+    const [resumeData, setResumeData] = useState(null);
+    
+    const [position, setPosition] = useState({ x: 20, y: 20 });
     const [isDragging, setIsDragging] = useState(false);
-    const dragRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
-    const controlsTimeout = useRef(null);
-    const mainContainerRef = useRef(null);
+    const dragStart = useRef({ x: 0, y: 0, initialX: 0, initialY: 0 });
 
     const isFavorite = useMemo(() => 
         currentStream ? favorites.some(f => f.id === currentStream.id) : false
@@ -73,1134 +55,558 @@ export default function VideoPlayer() {
         }
     }, []);
 
-    // Agrupamento de Episódios para o Drawer
-    const episodesBySeason = useMemo(() => {
-        if (!currentStream || currentStream.type !== 'series') return null;
-        return organizeBySeasons(playlist);
-    }, [currentStream, playlist]);
-
-    const seasons = useMemo(() => {
-        return episodesBySeason ? Object.keys(episodesBySeason).sort((a,b) => parseInt(a)-parseInt(b)) : [];
-    }, [episodesBySeason]);
-
-    useEffect(() => {
-        if (seasons.length > 0 && !seasons.includes(String(selectedSeason))) {
-            setSelectedSeason(parseInt(seasons[0]));
-        }
-    }, [seasons, selectedSeason]);
-
     const getStreamUrl = useCallback(() => {
         if (!currentStream) return '';
-        let url = currentStream.streamUrl || currentStream.url;
+        const url = currentStream.streamUrl || currentStream.url;
         if (!url) return '';
         
-        // Se o proxy estiver ativo e não for um link já proxied, envolvemos na URL de proxy do backend
-        if (useProxy && !url.includes('/api/proxy/stream')) {
-            const apiBase = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+        const isMixedContent = window.location.protocol === 'https:' && url.startsWith('http://');
+        if ((isMixedContent || useProxy) && !url.includes('/api/proxy/stream')) {
+            let apiBase = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
+            if (!apiBase.endsWith('/api')) apiBase += '/api';
             return `${apiBase}/proxy/stream?url=${encodeURIComponent(url)}`;
         }
-
         return url;
     }, [currentStream, useProxy]);
 
-    const handlePlayAction = useCallback(async () => {
-        if (!videoRef.current) return;
-        
-        const playVideo = async () => {
-            if (!videoRef.current) return;
-            try {
-                // Tenta tocar com som primeiro
-                videoRef.current.muted = false;
-                await videoRef.current.play();
-                setIsMuted(false);
-                if (!isPlaying) togglePlay();
-                setIsBuffering(false);
-            } catch (err) {
-                if (err.name === 'AbortError') return;
-                
-                if (!videoRef.current) return;
-                try {
-                    // Fallback para mudo (permitido pelo browser)
-                    videoRef.current.muted = true;
-                    await videoRef.current.play();
-                    setIsMuted(true);
-                    if (!isPlaying) togglePlay();
-                    setIsBuffering(false);
-                } catch (e) {
-                    if (e.name === 'AbortError') return;
-                    console.error("[PLAYER] Falha na reprodução:", e);
-                    setError("Erro ao iniciar vídeo.");
-                }
-            }
-        };
-
-        playVideo();
-    }, [isPlaying, togglePlay]);
-
-    // Listener global para "desbloquear" o áudio no primeiro clique
-    useEffect(() => {
-        const unlockAudio = () => {
-            if (videoRef.current && isMuted) {
-                videoRef.current.muted = false;
-                setIsMuted(false);
-                console.log("[PLAYER] Áudio desbloqueado por interação do usuário.");
-                document.removeEventListener('click', unlockAudio);
-                document.removeEventListener('keydown', unlockAudio);
-            }
-        };
-
-        if (isMuted) {
-            document.addEventListener('click', unlockAudio);
-            document.addEventListener('keydown', unlockAudio);
-        }
-        return () => {
-            document.removeEventListener('click', unlockAudio);
-            document.removeEventListener('keydown', unlockAudio);
-        };
-    }, [isMuted]);
-
-    // Sync isPlaying store state with video element
-    useEffect(() => {
-        if (!videoRef.current || !currentStream) return;
-        if (isPlaying) {
-            videoRef.current.play().catch(err => {
-                if (err.name !== 'AbortError') console.error("[PLAYER] Auto-play failed:", err);
-            });
-        } else {
-            videoRef.current.pause();
-        }
-    }, [isPlaying, currentStream]);
-
-    // Carregar comentários locais
-    useEffect(() => {
-        if (currentStream) {
-            const saved = localStorage.getItem(`comments_${currentStream.id}`);
-            setComments(saved ? JSON.parse(saved) : []);
-        }
-    }, [currentStream]);
-
-    const handleAddComment = (e) => {
-        e.preventDefault();
-        if (!newComment.trim()) return;
-        
-        const comment = {
-            id: Date.now(),
-            text: newComment,
-            user: 'Você',
-            date: new Date().toISOString()
-        };
-        
-        const updated = [comment, ...comments];
-        setComments(updated);
-        setNewComment('');
-        localStorage.setItem(`comments_${currentStream.id}`, JSON.stringify(updated));
-        toast.success('Comentário enviado!');
-    };
-
-    const handleCast = () => {
-        const video = videoRef.current;
-        if (!video) return;
-
-        // 1. Tentar AirPlay (Safari/iOS)
-        if (video.webkitShowPlaybackTargetPicker) {
-            video.webkitShowPlaybackTargetPicker();
-            return;
-        }
-
-        // 2. Tentar API de Controle Remoto (Padrão moderno)
-        if (video.remote && video.remote.state !== 'disabled') {
-            video.remote.prompt().catch((err) => {
-                console.error("[CAST] Remote prompt error:", err);
-                const ua = navigator.userAgent.toLowerCase();
-                if (ua.includes('chrome') && ua.includes('android')) {
-                    toast('Utilize a opção "Transmitir" no menu do Chrome para espelhar.', { icon: '📺' });
-                } else {
-                    toast.error('Não foi possível iniciar o espelhamento.');
-                }
-            });
-            return;
-        }
-
-        // 3. Fallback com orientações por dispositivo
-        const ua = navigator.userAgent.toLowerCase();
-        const isiOS = /iphone|ipad|ipod/.test(ua);
-        const isSafari = /^((?!chrome|android).)*safari/i.test(ua);
-
-        if (isiOS && !isSafari) {
-            toast('No iPhone, o AirPlay nativo requer o uso do navegador Safari.', { icon: '📺', duration: 5000 });
-        } else if (ua.includes('android')) {
-            toast('No Android, use o menu do Chrome > Transmitir para ver na TV.', { icon: '📺', duration: 5000 });
-        } else {
-            toast.error('O seu navegador não possui suporte a espelhamento nativo.');
-        }
-    };
-
-
-    useEffect(() => {
-        const handleMouseMove = (e) => {
-            if (!isDragging) return;
-            const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
-            const clientY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
-
-            const dx = dragRef.current.startX - clientX;
-            const dy = dragRef.current.startY - clientY;
-            
-            setPosition({
-                x: Math.max(10, dragRef.current.initialX + dx),
-                y: Math.max(10, dragRef.current.initialY + dy)
-            });
-        };
-        const handleMouseUp = () => setIsDragging(false);
-
-        if (isDragging) {
-            window.addEventListener('mousemove', handleMouseMove);
-            window.addEventListener('mouseup', handleMouseUp);
-            window.addEventListener('touchmove', handleMouseMove);
-            window.addEventListener('touchend', handleMouseUp);
-        }
-        return () => {
-            window.removeEventListener('mousemove', handleMouseMove);
-            window.removeEventListener('mouseup', handleMouseUp);
-            window.removeEventListener('touchmove', handleMouseMove);
-            window.removeEventListener('touchend', handleMouseUp);
-        };
-    }, [isDragging]);
-
-    useEffect(() => {
-        const handler = () => {
-            setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement));
-        };
-        document.addEventListener('fullscreenchange', handler);
-        document.addEventListener('webkitfullscreenchange', handler);
-        document.addEventListener('mozfullscreenchange', handler);
-        document.addEventListener('MSFullscreenChange', handler);
-        return () => {
-            document.removeEventListener('fullscreenchange', handler);
-            document.removeEventListener('webkitfullscreenchange', handler);
-            document.removeEventListener('mozfullscreenchange', handler);
-            document.removeEventListener('MSFullscreenChange', handler);
-        };
-    }, []);
-
-    const handleFullscreen = () => {
-        const container = mainContainerRef.current;
-        if (!container) return;
-
-        if (!isFullscreen) {
-            if (container.requestFullscreen) {
-                container.requestFullscreen();
-            } else if (container.webkitRequestFullscreen) {
-                container.webkitRequestFullscreen();
-            } else if (container.mozRequestFullScreen) {
-                container.mozRequestFullScreen();
-            } else if (container.msRequestFullscreen) {
-                container.msRequestFullscreen();
-            } else if (videoRef.current?.webkitEnterFullscreen) {
-                videoRef.current.webkitEnterFullscreen();
-            }
-        } else {
-            if (document.exitFullscreen) {
-                document.exitFullscreen();
-            } else if (document.webkitExitFullscreen) {
-                document.webkitExitFullscreen();
-            } else if (document.mozCancelFullScreen) {
-                document.mozCancelFullScreen();
-            } else if (document.msExitFullscreen) {
-                document.msExitFullscreen();
-            }
-        }
-    };
-
-    const handleMouseDown = (e) => {
-        if (!isMinimized) return;
-        setIsDragging(true);
-        const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
-        const clientY = e.type.includes('touch') ? e.touches[0].clientY : e.clientY;
-        dragRef.current = {
-            startX: clientX,
-            startY: clientY,
-            initialX: position.x,
-            initialY: position.y
-        };
-    };
-
-    const init = useCallback((attempt = 0) => {
+    const initPlayer = useCallback(async (attempt = 0) => {
         if (!currentStream || !videoRef.current) return;
-        
-        const rawUrl = currentStream.streamUrl || currentStream.url || '';
-        if (!rawUrl) {
-            console.error("[PLAYER] URL de transmissão vazia.");
-            setError("URL de transmissão não encontrada.");
-            return;
-        }
-
-        const isHls = rawUrl.toLowerCase().includes('.m3u8') || rawUrl.toLowerCase().includes('type=m3u8');
-        let isTs = rawUrl.toLowerCase().includes('.ts') || rawUrl.toLowerCase().includes('output=ts') || rawUrl.toLowerCase().includes('mpegts') || rawUrl.includes('#');
-
-        // Detecção de Mixed Content (HTTP em página HTTPS)
-        const isMixedContent = window.location.protocol === 'https:' && rawUrl.startsWith('http://');
-        if ((isMixedContent || attempt > 0) && !useProxy) {
-            console.warn(`[PLAYER] Ativando Smart Proxy (Mixed Content ou Fallback). Tentativa: ${attempt}`);
-            setUseProxy(true);
-            return; // O próximo render com useProxy=true chamará init novamente
-        }
-
         const streamUrl = getStreamUrl();
-
-        // Lógica de Tentativas (Cadeia de Decodificadores)
-        if (currentStream.type === 'channel' && !isHls) isTs = true;
+        const isHls = streamUrl.toLowerCase().includes('.m3u8') || streamUrl.includes('type=m3u8');
+        const isTs = streamUrl.toLowerCase().includes('.ts') || streamUrl.includes('output=ts');
         
-        // Ajuste baseado em tentativas de fallback
-        // attempt 0: Tenta o formato detectado
-        // attempt 1: Força o outro formato (TS se era HLS, ou vice-versa) ou tenta nativo
-        let useHls = isHls && attempt === 0;
-        let useTs = (isTs || (isHls && attempt === 1)) && !useHls;
-
+        cleanUp();
         setError(null);
         setIsBuffering(true);
-        cleanUp();
-        statsApi.incrementView(currentStream);
 
-        console.log(`[PLAYER] Tentativa ${attempt}: isHls=${isHls} | isTs=${isTs} | useHls=${useHls} | useTs=${useTs} | url=${rawUrl.substring(0, 50)}...`);
-
-        // 1. Tentar HLS.js
-        if (useHls && Hls.isSupported()) {
+        // Detectar se é Safari/iOS que requer player nativo para HLS
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent) || /iPad|iPhone|iPod/.test(navigator.platform);
+        
+        if (isHls && videoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
+            // Player Nativo (Safari/iOS)
+            videoRef.current.src = streamUrl;
+            videoRef.current.play().catch(() => {
+                videoRef.current.muted = true;
+                videoRef.current.play();
+                setIsMuted(true);
+            });
+        } else if (isHls && Hls.isSupported()) {
+            // Hls.js (Chrome, Firefox, Android, etc)
             const hls = new Hls({ 
                 enableWorker: true, 
-                lowLatencyMode: true,
-                backBufferLength: 60,
-                manifestLoadingMaxRetry: 3
+                lowLatencyMode: true, 
+                manifestLoadingMaxRetry: 10,
+                xhrSetup: (xhr) => { xhr.withCredentials = false; }
             });
             hls.loadSource(streamUrl);
             hls.attachMedia(videoRef.current);
             hlsRef.current = hls;
-            hls.on(Hls.Events.MANIFEST_PARSED, handlePlayAction);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => videoRef.current.play().catch(() => {
+                videoRef.current.muted = true;
+                videoRef.current.play();
+                setIsMuted(true);
+            }));
             hls.on(Hls.Events.ERROR, (e, data) => {
-                const errorCode = data.response?.code;
-                if (errorCode === 522 || errorCode === 504 || errorCode === 403) {
-                    if (!useProxy) {
-                        console.warn(`[PLAYER] Erro ${errorCode} no HLS. Tentando Proxy Pro...`);
+                if (data.fatal) {
+                    if (data.type === Hls.ErrorTypes.NETWORK_ERROR && !useProxy) {
                         setUseProxy(true);
-                        init(); // Tenta carregar novamente com proxy
                     } else {
-                        setError(`Erro ${errorCode}: O servidor da transmissão não responde.`);
+                        setError("Erro ao carregar a stream HLS.");
                     }
-                } else if (data.fatal) {
-                    console.warn("[PLAYER] Falha fatal no HLS, tentando fallback TS...");
-                    init(attempt + 1);
                 }
             });
-            hls.on(Hls.Events.FRAG_BUFFERED, () => setIsBuffering(false));
-        } 
-        // 2. Tentar MPEG-TS (mpegts.js)
-        else if (useTs && mpegjs.isSupported()) {
+        } else if (isTs && mpegjs.isSupported()) {
+            // MPEG-TS (mse)
             try {
-                const mpeg = mpegjs.createPlayer({
-                    type: 'mse',
-                    url: streamUrl,
-                    isLive: currentStream.type === 'channel' || isTs,
-                    enableStashBuffer: false,
-                    stashInitialSize: 128
-                });
+                const mpeg = mpegjs.createPlayer({ type: 'mse', url: streamUrl, isLive: true });
                 mpeg.attachMediaElement(videoRef.current);
                 mpeg.load();
+                mpeg.play().catch(() => {
+                    videoRef.current.muted = true;
+                    videoRef.current.play();
+                    setIsMuted(true);
+                });
                 mpegPlayerRef.current = mpeg;
-                
-                mpeg.on(mpegjs.Events.METADATA_ARRIVED, () => {
-                   handlePlayAction();
-                   setIsBuffering(false);
-                });
-
-                mpeg.on(mpegjs.Events.ERROR, (type, detail, info) => {
-                    console.error(`[PLAYER] Erro MPEG-TS: ${type} - ${detail}`, info);
-                    
-                    const errorCode = info?.code;
-                    const isNetworkError = detail === mpegjs.ErrorDetails.NETWORK_TIMEOUT || errorCode === 522 || errorCode === 504 || detail === 'HttpStatusCodeInvalid';
-                    
-                    if (isNetworkError && !useProxy) {
-                        console.warn("[PLAYER] Erro de rede no TS. Ativando Proxy Pro...");
-                        setUseProxy(true);
-                        init();
-                    } else if (isNetworkError) {
-                        setError("Conexão interrompida (Timeout). O servidor da lista demorou muito para responder.");
-                    } else if (attempt < 1) {
-                        init(attempt + 1);
-                    } else {
-                        setError("Erro no decodificador ou servidor de vídeo. Tente outro canal.");
-                    }
-                });
-                
-                // Algumas streams TS demoram a emitir METADATA_ARRIVED, tentamos play logo
-                handlePlayAction();
-            } catch (err) {
-                console.error("[PLAYER] Falha ao iniciar mpegts:", err);
-                init(attempt + 1);
-            }
-        } 
-        // 3. Fallback Nativo (Safari HLS, MP4, etc.)
-        else {
-            videoRef.current.src = streamUrl;
-            videoRef.current.load();
-            handlePlayAction();
-            setIsBuffering(false);
-        }
-
-        // --- Lógica de Retomada (Resume) ---
-        if (currentStream.type === 'movie' || currentStream.type === 'series') {
-            const playlistId = getActivePlaylist()?.id;
-            const progress = getProgress(currentStream.id);
-            if (progress && progress.currentTime > 10 && (progress.duration - progress.currentTime > 30)) {
-                console.log(`[PLAYER] Retomando em ${progress.currentTime}s`);
-                videoRef.current.currentTime = progress.currentTime;
-                toast(`Retomando de ${formatTime(progress.currentTime)}`, { icon: '🕒' });
-            }
-        }
-    }, [currentStream, getStreamUrl, handlePlayAction, cleanUp, getProgress, getActivePlaylist]);
-
-    useEffect(() => {
-        init();
-        setShowFullEpg(false); // Reseta ao mudar de canal
-        
-        // Helper para decodificar texto do EPG (Xtream usa Base64 com UTF-8)
-        const decodeEPGText = (str) => {
-            if (!str) return '';
-            try {
-                // Tenta decodificar como Base64 UTF-8
-                return decodeURIComponent(escape(atob(str)));
-            } catch (e) {
-                try {
-                    // Fallback para Base64 simples
-                    return atob(str);
-                } catch (e2) {
-                    // Se não for base64, retorna o original
-                    return str;
-                }
-            }
-        };
-
-        // Helper para lidar com datas do EPG (pode vir em vários formatos)
-        const parseEPGDate = (dateStr) => {
-            if (!dateStr) return new Date();
-            const iso = dateStr.replace(' ', 'T');
-            const d = new Date(iso);
-            return isNaN(d.getTime()) ? new Date() : d;
-        };
-
-        // EPG Fetching Logic
-        if (currentStream?.type === 'channel') {
-            const fetchEPG = async () => {
-                try {
-                    const manager = usePlaylistManagerStore.getState();
-                    const activePlaylist = manager.getActivePlaylist();
-                    
-                    if (activePlaylist?.type === 'xtream' && currentStream.id.startsWith('xtream_')) {
-                        const streamId = currentStream.id.split('_').pop();
-                        const { server, username, password } = activePlaylist.config;
-                        
-                        const { data } = await api.get('/xtream/short-epg', {
-                            params: { server, username, password, stream_id: streamId }
-                        });
-
-                        if (data && data.epg_listings && data.epg_listings.length > 0) {
-                            const now = new Date();
-                            
-                            let currentIndex = data.epg_listings.findIndex(item => {
-                                const start = parseEPGDate(item.start);
-                                const end = parseEPGDate(item.end);
-                                return now >= start && now <= end;
-                            });
-
-                            if (currentIndex === -1) {
-                                currentIndex = data.epg_listings.findIndex(item => parseEPGDate(item.start) > now);
-                            }
-
-                            const nowListing = currentIndex !== -1 ? data.epg_listings[currentIndex] : data.epg_listings[0];
-                            const nextListing = currentIndex !== -1 ? data.epg_listings[currentIndex + 1] : data.epg_listings[1];
-                            
-                            if (nowListing) {
-                                setEpgInfo({
-                                    current: {
-                                        title: decodeEPGText(nowListing.title),
-                                        desc: decodeEPGText(nowListing.description),
-                                        start: parseEPGDate(nowListing.start),
-                                        end: parseEPGDate(nowListing.end)
-                                    },
-                                    next: nextListing ? {
-                                        title: decodeEPGText(nextListing.title)
-                                    } : null,
-                                    full: data.epg_listings.map(it => ({
-                                        ...it,
-                                        title: decodeEPGText(it.title),
-                                        description: decodeEPGText(it.description),
-                                        startTime: parseEPGDate(it.start),
-                                        endTime: parseEPGDate(it.end)
-                                    }))
-                                });
-                            }
-                        } else {
-                            setEpgInfo(null);
-                        }
-                    } else if (activePlaylist?.epgCacheKey) {
-                        // XMLTV / GLOBAL EPG SYNC
-                        const channelId = currentStream.tvgId || currentStream.name;
-                        const { data } = await api.get(`/epg/${encodeURIComponent(channelId)}`, {
-                            params: { cacheKey: activePlaylist.epgCacheKey }
-                        });
-
-                        if (data && data.length > 0) {
-                            const now = new Date();
-                            const listings = data.map(item => ({
-                                title: item.title,
-                                description: item.desc,
-                                start: item.start, 
-                                end: item.stop
-                            }));
-
-                            const parseXmltvDate = (str) => {
-                                if (!str) return new Date();
-                                const y = str.substring(0, 4);
-                                const m = str.substring(4, 6);
-                                const d = str.substring(6, 8);
-                                const h = str.substring(8, 10);
-                                const min = str.substring(10, 12);
-                                const s = str.substring(12, 14);
-                                return new Date(`${y}-${m}-${d}T${h}:${min}:${s}`);
-                            };
-
-                            let currentIndex = listings.findIndex(item => {
-                                const start = parseXmltvDate(item.start);
-                                const end = parseXmltvDate(item.end);
-                                return now >= start && now <= end;
-                            });
-
-                            if (currentIndex === -1) {
-                                currentIndex = listings.findIndex(item => parseXmltvDate(item.start) > now);
-                            }
-
-                            const nowListing = currentIndex !== -1 ? listings[currentIndex] : listings[0];
-                            const nextListing = currentIndex !== -1 ? listings[currentIndex + 1] : listings[1];
-
-                            if (nowListing) {
-                                setEpgInfo({
-                                    current: {
-                                        title: nowListing.title,
-                                        desc: nowListing.description,
-                                        start: parseXmltvDate(nowListing.start),
-                                        end: parseXmltvDate(nowListing.end)
-                                    },
-                                    next: nextListing ? {
-                                        title: nextListing.title
-                                    } : null,
-                                    full: listings.map(it => ({
-                                        title: it.title,
-                                        description: it.description,
-                                        startTime: parseXmltvDate(it.start),
-                                        endTime: parseXmltvDate(it.end)
-                                    }))
-                                });
-                            }
-                        } else {
-                            setEpgInfo(null);
-                        }
-                    } else {
-                        setEpgInfo(null);
-                    }
-                } catch (error) {
-                    console.error("[EPG] Erro ao buscar programação:", error);
-                    setEpgInfo(null);
-                }
-            };
-            fetchEPG();
+            } catch (err) { setError("O formato TS não é suportado neste dispositivo."); }
         } else {
-            setEpgInfo(null);
+            // Fallback genérico (MP4, etc)
+            videoRef.current.src = streamUrl;
+            videoRef.current.play().catch(() => {
+                videoRef.current.muted = true;
+                videoRef.current.play();
+                setIsMuted(true);
+            });
         }
 
-        return cleanUp;
-    }, [init, cleanUp, currentStream]);
+        // Tentar restaurar progresso após o vídeo carregar
+        if (currentStream.type === 'movie' || currentStream.type === 'series') {
+            loadProgress();
+        }
+    }, [currentStream, getStreamUrl, cleanUp, useProxy]);
 
     useEffect(() => {
-        const handler = () => {
-            setShowControls(true);
-            if (controlsTimeout.current) clearTimeout(controlsTimeout.current);
-            controlsTimeout.current = setTimeout(() => setShowControls(false), 3000);
+        if (!videoRef.current) return;
+        
+        const video = videoRef.current;
+        
+        // Detecção de AirPlay (Safari/iOS)
+        const checkAirPlay = () => {
+            if (window.WebKitPlaybackTargetAvailabilityEvent) {
+                video.addEventListener('webkitplaybacktargetavailabilitychanged', (e) => {
+                    setAirplayAvailable(e.availability === 'available');
+                });
+            } else if (video.webkitShowPlaybackTargetPicker) {
+                // Se a função existe mas o evento não disparou, assume disponível no iOS
+                setAirplayAvailable(true);
+            } else if (video.remote && video.remote.state !== 'unavailable') {
+                setAirplayAvailable(true);
+            }
         };
-        window.addEventListener('mousemove', handler);
-        window.addEventListener('touchstart', handler);
-        return () => {
-            window.removeEventListener('mousemove', handler);
-            window.removeEventListener('touchstart', handler);
-        };
+        checkAirPlay();
     }, []);
 
+    const toggleFullscreen = () => {
+        if (!videoRef.current) return;
+        
+        const video = videoRef.current;
+        const container = containerRef.current;
+
+        // Suporte para iOS (Safari) - Maximização nativa do vídeo
+        if (video.webkitEnterFullscreen) {
+            video.webkitEnterFullscreen();
+            return;
+        }
+
+        // Suporte para Android/Desktop
+        if (!document.fullscreenElement) {
+            if (container.requestFullscreen) {
+                container.requestFullscreen();
+            } else if (container.webkitRequestFullscreen) {
+                container.webkitRequestFullscreen();
+            } else if (container.msRequestFullscreen) {
+                container.msRequestFullscreen();
+            }
+        } else {
+            if (document.exitFullscreen) {
+                document.exitFullscreen();
+            }
+        }
+    };
+
     const handleDownload = () => {
-        const rawUrl = currentStream.streamUrl || currentStream.url;
-        if (rawUrl.includes('.m3u8')) return toast.error('Download indisponível para HLS');
-        const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
-        window.open(`${apiUrl}/proxy/download?url=${encodeURIComponent(rawUrl)}&filename=${encodeURIComponent(currentStream.name)}`, '_blank');
+        if (!currentStream) return;
+        const url = currentStream.streamUrl || currentStream.url;
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${currentStream.name}.mp4`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
         toast.success('Download iniciado...');
     };
 
-    const handleFullscreenOld = () => {
-        // Esta função foi substituída pela handleFullscreen moderna acima
+    const handlePiP = async () => {
+        try {
+            if (document.pictureInPictureEnabled && videoRef.current !== document.pictureInPictureElement) {
+                await videoRef.current.requestPictureInPicture();
+            } else if (document.pictureInPictureElement) {
+                await document.exitPictureInPicture();
+            }
+        } catch (error) {
+            console.error('PiP Error:', error);
+        }
     };
 
-    const formatTime = (seconds) => {
-        if (!seconds || !Number.isFinite(seconds) || seconds < 0) return '00:00:00';
-        const h = Math.floor(seconds / 3600);
-        const m = Math.floor((seconds % 3600) / 60);
-        const s = Math.floor(seconds % 60);
-        return [h, m, s].map(v => v.toString().padStart(2, '0')).join(':');
+    const handleAirPlay = async () => {
+        if (videoRef.current?.webkitShowPlaybackTargetPicker) {
+            videoRef.current.webkitShowPlaybackTargetPicker();
+        } else if (videoRef.current?.remote) {
+            try {
+                await videoRef.current.remote.prompt();
+            } catch (e) {
+                console.error('Cast Error:', e);
+            }
+        } else {
+            toast.error('Transmissão não suportada neste navegador.');
+        }
     };
 
-    // Não retornamos null para manter o elemento de vídeo montado e com o áudio "desbloqueado" pelo browser
-    const isVisible = !!currentStream;
-    const stream = currentStream || {};
+    const { getActivePlaylist } = usePlaylistManagerStore();
+
+    const loadProgress = async () => {
+        const active = getActivePlaylist();
+        if (!active || !currentStream) return;
+        
+        try {
+            const response = await api.get('/progress', {
+                params: { mediaId: currentStream.id, playlistId: active.id }
+            });
+            
+            if (response.data?.progress) {
+                const pos = response.data.progress.last_position;
+                if (pos > 10) {
+                    setResumeData(pos);
+                }
+            }
+        } catch (error) {
+            console.warn('[PROGRESS] Falha ao carregar:', error.message);
+        }
+    };
+
+    const handleResume = (shouldResume) => {
+        if (shouldResume && videoRef.current && resumeData) {
+            videoRef.current.currentTime = resumeData;
+            videoRef.current.play().catch(() => {});
+            toast.success(`Continuando de ${formatTime(resumeData)}`, { icon: '🕒' });
+        }
+        setResumeData(null);
+    };
+
+    const saveProgress = async () => {
+        if (!videoRef.current || !currentStream) return;
+        if (currentStream.type === 'channel') return;
+
+        const active = getActivePlaylist();
+        if (!active) return;
+
+        try {
+            await api.post('/progress', {
+                mediaId: currentStream.id,
+                playlistId: active.id,
+                currentTime: videoRef.current.currentTime,
+                duration: videoRef.current.duration
+            });
+        } catch (error) {
+            console.warn('[PROGRESS] Falha ao salvar:', error.message);
+        }
+    };
+
+    // Salvar progresso periodicamente
+    useEffect(() => {
+        if (currentStream?.type === 'channel') return;
+        
+        const interval = setInterval(() => {
+            saveProgress();
+        }, 15000); // A cada 15 segundos
+
+        return () => {
+            clearInterval(interval);
+            saveProgress(); // Salvar ao fechar
+        };
+    }, [currentStream]);
+
+    const seek = (seconds) => {
+        if (videoRef.current) {
+            videoRef.current.currentTime += seconds;
+        }
+    };
+
+    useEffect(() => {
+        if (!videoRef.current) return;
+        if (isPlaying) {
+            videoRef.current.play().catch(() => {});
+        } else {
+            videoRef.current.pause();
+        }
+    }, [isPlaying]);
+
+    useEffect(() => {
+        initPlayer();
+        return cleanUp;
+    }, [currentStream, useProxy, initPlayer]);
+
+    useEffect(() => {
+        const handleVisibilityChange = async () => {
+            if (document.visibilityState === 'hidden' && videoRef.current && isPlaying && !error) {
+                try {
+                    if (document.pictureInPictureEnabled && videoRef.current !== document.pictureInPictureElement) {
+                        await videoRef.current.requestPictureInPicture();
+                    }
+                } catch (e) {
+                    console.warn('[PiP] Auto-PiP failed:', e);
+                }
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+    }, [isPlaying, error]);
+
+    useEffect(() => {
+        let timeout;
+        const resetTimer = () => {
+            setShowControls(true);
+            clearTimeout(timeout);
+            timeout = setTimeout(() => setShowControls(false), 3000);
+        };
+        window.addEventListener('mousemove', resetTimer);
+        window.addEventListener('touchstart', resetTimer);
+        return () => {
+            window.removeEventListener('mousemove', resetTimer);
+            window.removeEventListener('touchstart', resetTimer);
+        };
+    }, []);
+
+    const handleDragStart = (e) => {
+        return;
+    };
+
+    useEffect(() => {
+        const handleMove = (e) => {
+            if (!isDragging) return;
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            const dx = dragStart.current.x - clientX;
+            const dy = dragStart.current.y - clientY;
+            setPosition({
+                x: Math.max(10, Math.min(window.innerWidth - 100, dragStart.current.initialX + dx)),
+                y: Math.max(10, Math.min(window.innerHeight - 100, dragStart.current.initialY + dy))
+            });
+        };
+        const handleEnd = () => setIsDragging(false);
+        if (isDragging) {
+            window.addEventListener('mousemove', handleMove);
+            window.addEventListener('mouseup', handleEnd);
+            window.addEventListener('touchmove', handleMove);
+            window.addEventListener('touchend', handleEnd);
+        }
+        return () => {
+            window.removeEventListener('mousemove', handleMove);
+            window.removeEventListener('mouseup', handleEnd);
+            window.removeEventListener('touchmove', handleMove);
+            window.removeEventListener('touchend', handleEnd);
+        };
+    }, [isDragging]);
+
+    if (!currentStream) return null;
 
     return (
         <div 
-            ref={mainContainerRef}
-            onMouseDown={handleMouseDown}
-            onTouchStart={handleMouseDown}
-            style={isMinimized ? { 
-                bottom: `${position.y}px`, 
-                right: `${position.x}px`,
-                cursor: isDragging ? 'grabbing' : 'grab',
-                touchAction: 'none'
-            } : {}}
-            className={`fixed z-[200] bg-black flex items-center justify-center overflow-hidden font-sans 
-                ${!isDragging ? 'transition-all duration-300' : ''}
-                ${isVisible ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}
-                ${isMinimized ? 'w-64 h-36 lg:w-80 lg:h-48 rounded-3xl shadow-2xl border border-white/10' : 'inset-0'}`}
+            ref={containerRef}
+            className={`fixed z-[999] bg-black shadow-2xl transition-all duration-500 ease-out flex items-center justify-center group/container inset-0
+                ${isDragging ? 'scale-105 cursor-grabbing' : ''}`}
+            onMouseDown={handleDragStart}
+            onTouchStart={handleDragStart}
         >
-            {/* O Vídeo deve estar sempre centralizado */}
-            <div className="relative w-full h-full flex items-center justify-center">
-                <video
-                    ref={videoRef}
-                    className="w-full h-full object-contain cursor-pointer"
-                    x-webkit-airplay="allow"
-                    webkit-playsinline="true"
-                    airplay="allow"
-                    onClick={(e) => { 
-                        e.stopPropagation();
-                        if (isMinimized) {
-                            setIsMinimized(false);
-                        } else {
-                            togglePlay(); 
-                        }
-                    }}
-                    onWaiting={() => setIsBuffering(true)}
-                    onPlaying={() => setIsBuffering(false)}
-                    onTimeUpdate={() => {
-                        const time = videoRef.current?.currentTime || 0;
-                        setCurrentTime(time);
-                        
-                        // Salvar progresso a cada 10 segundos para VOD
-                        if ((currentStream?.type === 'movie' || currentStream?.type === 'series') && Math.floor(time) % 10 === 0 && time > 5) {
-                            const playlistId = getActivePlaylist()?.id;
-                            if (playlistId) {
-                                saveProgress(playlistId, currentStream.id, time, videoRef.current?.duration || 0);
-                            }
-                        }
-                    }}
-                    onLoadedMetadata={() => setDuration(videoRef.current?.duration || 0)}
-                    playsInline
-                    crossOrigin="anonymous"
-                />
+            <video 
+                ref={videoRef}
+                className="w-full h-full object-contain"
+                onWaiting={() => setIsBuffering(true)}
+                onPlaying={() => setIsBuffering(false)}
+                onTimeUpdate={() => setCurrentTime(videoRef.current?.currentTime || 0)}
+                onLoadedMetadata={() => setDuration(videoRef.current?.duration || 0)}
+                onClick={() => {
+                    setShowControls(!showControls);
+                }}
+                playsInline
+                autoPlay
+                x-webkit-airplay="allow"
+                webkit-playsinline="true"
+            />
 
-
-            </div>
-
-            {/* INFO DO CANAL NO CANTO ESQUERDO CENTRAL (Reduzido no Mobile para não chocar com o centro) */}
-            {/* INFO DO CANAL NO CANTO ESQUERDO CENTRAL */}
-            <div className={`absolute top-4 lg:top-1/2 lg:-translate-y-1/2 left-4 lg:left-12 z-50 transition-all duration-700 flex flex-col gap-1 lg:gap-3 origin-top-left scale-[0.6] lg:scale-100 
-                ${(showControls && !isMinimized) ? 'translate-x-0 opacity-100' : '-translate-x-10 opacity-0 pointer-events-none'}`}>
-                {stream.logo && (
-                    <div className="w-10 h-10 lg:w-16 lg:h-16 bg-black/40 backdrop-blur-md rounded-2xl p-1.5 lg:p-2 border border-white/10 shadow-2xl mb-1 lg:mb-2">
-                        <img src={stream.logo} className="w-full h-full object-contain drop-shadow-lg" alt="logo" />
-                    </div>
-                )}
-                
-                <div className="flex flex-col gap-1 w-[260px] lg:w-[400px]">
-                    <h2 className="text-xl lg:text-3xl font-black text-white tracking-tight drop-shadow-2xl leading-tight">
-                        {stream.name}
-                    </h2>
-                    
-                    <div className="flex items-center gap-2 mt-1 mb-2">
-                        <span className="text-[10px] font-black text-primary uppercase tracking-widest leading-none drop-shadow-md">
-                            {stream.group || 'Geral'}
-                        </span>
-                    </div>
-                    
-                    {/* UI de EPG Dinâmico */}
-                    {epgInfo?.current && (
-                        <div className="mt-3 space-y-2 animate-fade-in bg-black/40 backdrop-blur-md p-4 rounded-2xl border border-white/10 shadow-2xl">
-                            <p className="text-sm font-bold text-white line-clamp-2 md:line-clamp-1 flex items-center gap-2 uppercase tracking-tighter shadow-sm">
-                                <span className="text-[9px] px-2 py-1 bg-red-600 rounded text-white font-black animate-pulse flex-shrink-0">
-                                    AO VIVO
-                                </span>
-                                <span className="truncate">{epgInfo.current.title}</span>
-                            </p>
-                            
-                            {/* Barra de Progresso do Programa */}
-                            {(() => {
-                                const now = new Date();
-                                const start = new Date(epgInfo.current.start);
-                                const end = new Date(epgInfo.current.end);
-                                const total = end - start;
-                                const elapsed = now - start;
-                                const progress = Math.min(100, Math.max(0, (elapsed / total) * 100));
-                                
-                                return (
-                                    <div className="w-full h-1.5 bg-white/20 rounded-full overflow-hidden mt-1 shadow-inner">
-                                        <div className="h-full bg-white transition-all duration-500 rounded-full drop-shadow-[0_0_5px_rgba(255,255,255,0.5)]" style={{ width: `${progress}%` }} />
-                                    </div>
-                                );
-                            })()}
-
-                            {epgInfo.next && (
-                                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest truncate mt-2">
-                                    <span className="text-white/60">Próximo:</span> {epgInfo.next.title}
-                                </p>
-                            )}
+            {/* Resume Prompt Overlay */}
+            {resumeData && (
+                <div className="absolute inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center animate-fade-in">
+                    <div className="bg-surface/90 border border-white/10 p-8 rounded-[2.5rem] shadow-2xl text-center max-w-sm mx-4 transform animate-scale-up">
+                        <div className="w-16 h-16 bg-primary/20 text-primary rounded-full flex items-center justify-center mx-auto mb-6">
+                            <FiRotateCw size={32} />
                         </div>
-                    )}
+                        <h3 className="text-xl font-black text-white mb-2">Continuar assistindo?</h3>
+                        <p className="text-gray-400 text-sm mb-8 font-medium">Você parou em <span className="text-white font-bold">{formatTime(resumeData)}</span>. Como deseja prosseguir?</p>
+                        <div className="grid grid-cols-1 gap-3">
+                            <button 
+                                onClick={() => handleResume(true)}
+                                className="w-full py-4 bg-primary text-white rounded-2xl font-black uppercase tracking-wider hover:scale-[1.02] active:scale-95 transition-all shadow-lg shadow-primary/20"
+                            >
+                                Continuar de onde parei
+                            </button>
+                            <button 
+                                onClick={() => handleResume(false)}
+                                className="w-full py-4 bg-white/5 text-white/70 hover:text-white rounded-2xl font-black uppercase tracking-wider hover:bg-white/10 transition-all"
+                            >
+                                Começar do início
+                            </button>
+                        </div>
+                    </div>
                 </div>
-            </div>
+            )}
 
-            {/* BOTÕES DE AÇÃO NO CANTO SUPERIOR DIREITO */}
-            <div className={`absolute top-4 right-4 lg:top-8 lg:right-8 z-[60] transition-all duration-700 flex items-center gap-2 lg:gap-4 
-                ${(showControls || isMinimized) ? 'translate-x-0 opacity-100' : 'translate-x-10 opacity-0 pointer-events-none'}`}>
-                {!isMinimized && (
-                    <button 
-                        onClick={() => { if (isFavorite) removeFavorite(stream.id); else addFavorite(stream); toast.success(isFavorite ? 'Removido dos favoritos' : 'Salvo nos favoritos'); }}
-                        className={`p-2 rounded-xl transition-all active:scale-90 ${isFavorite ? 'text-red-500' : 'text-white/80 hover:text-white'}`}
-                    >
-                        <FiHeart size={20} fill={isFavorite ? 'currentColor' : 'none'} />
-                    </button>
-                )}
-
-                {!isMinimized && (
-                    <button 
-                        onClick={(e) => { e.stopPropagation(); setIsMinimized(true); }}
-                        className="p-2 bg-black/40 backdrop-blur-md rounded-xl text-white/80 hover:text-white border border-white/10 transition-all"
-                    >
-                        <FiMinimize2 size={18} />
-                    </button>
-                )}
-                
-                {isMinimized && (
-                    <button 
-                        onClick={(e) => { e.stopPropagation(); setIsMinimized(false); }}
-                        className="p-1.5 bg-black/40 backdrop-blur-md rounded-lg text-white/80 hover:text-white border border-white/10 transition-all"
-                    >
-                        <FiMaximize size={14} />
-                    </button>
-                )}
-
-                <button 
-                    onClick={(e) => { e.stopPropagation(); setCurrentStream(null); }} 
-                    className={`p-1.5 lg:p-2 bg-black/40 backdrop-blur-md rounded-lg lg:rounded-xl text-white/80 hover:text-white border border-white/10 transition-all transform hover:rotate-90`}
-                >
-                    <FiX size={isMinimized ? 16 : 20} />
-                </button>
-
-            </div>
-
-            {/* Overlays Cinematográficos Removidos para Transparência Total */}
-            <div className={`absolute inset-0 bg-black/10 transition-opacity duration-1000 pointer-events-none ${showControls ? 'opacity-100' : 'opacity-0'}`} />
-
-            {/* Loading Profissional */}
             {isBuffering && !error && (
-                <div className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none">
-                    <div className="flex flex-col items-center gap-6">
-                        <div className="w-20 h-20 border-4 border-primary/10 border-t-primary rounded-full animate-spin shadow-[0_0_30px_rgba(108,92,231,0.2)]" />
-                        <div className="flex flex-col items-center gap-2 text-center">
-                            <span className="text-white/40 text-[10px] uppercase font-black tracking-[0.5em] animate-pulse">Sintonizando</span>
-                            {useProxy && <span className="text-primary text-[8px] font-bold uppercase tracking-widest bg-primary/10 px-2 py-0.5 rounded border border-primary/20">Modo Proxy Ativo</span>}
-                        </div>
-                    </div>
+                <div className="absolute inset-0 flex items-center justify-center bg-black/20 pointer-events-none">
+                    <div className="w-16 h-16 border-4 border-primary/20 border-t-primary rounded-full animate-spin" />
                 </div>
             )}
 
-
-            {/* UI de Erro (Compacta e Elevada) */}
             {error && (
-                <div className="absolute inset-0 z-[100] bg-black/95 backdrop-blur-2xl flex items-center justify-center p-6 pb-32">
-                    <div className="text-center max-w-xs animate-fade-in">
-                        <div className="w-14 h-14 bg-red-500/10 rounded-full flex items-center justify-center mx-auto mb-4">
-                            <FiRefreshCw className="text-red-500 text-2xl animate-spin-slow" />
+                <div className="absolute inset-0 bg-black/90 flex flex-col items-center justify-center p-4 text-center z-50">
+                    <p className="text-red-500 font-bold mb-4">{error}</p>
+                    <button onClick={() => initPlayer()} className="px-6 py-3 bg-primary rounded-xl text-sm font-black uppercase tracking-wider shadow-lg shadow-primary/20">Tentar Novamente</button>
+                </div>
+            )}
+
+            {/* Repositioned Title/EPG Info (Top-Left) */}
+            <div className={`absolute left-0 top-0 p-6 lg:p-10 transition-all duration-500 z-40 max-w-[80%] lg:max-w-md
+                ${(showControls) ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-10 pointer-events-none'}`}>
+                <div className="flex flex-col gap-1 md:gap-2">
+                    <h3 className="text-white text-xl lg:text-4xl font-black leading-tight drop-shadow-2xl">{currentStream.name}</h3>
+                    <div className="flex items-center gap-3">
+                        <span className="px-2 py-0.5 md:px-3 md:py-1 bg-primary text-white text-[9px] lg:text-[12px] font-black rounded-lg uppercase tracking-[0.2em] shadow-lg shadow-primary/20">{currentStream.group}</span>
+                        {duration === 0 && <span className="flex items-center gap-1.5 md:gap-2 text-[9px] lg:text-[12px] text-red-500 font-black uppercase tracking-widest animate-pulse"><div className="w-1.5 h-1.5 bg-red-500 rounded-full" /> AO VIVO</span>}
+                    </div>
+                </div>
+            </div>
+
+            {/* Top Right Actions */}
+            <div className={`absolute top-0 right-0 p-6 flex flex-col items-end gap-3 transition-opacity duration-300 z-40
+                ${(showControls) ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                
+                <button 
+                    onClick={() => setCurrentStream(null)} 
+                    className="flex items-center gap-2 px-5 py-2.5 bg-black/40 hover:bg-red-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest transition-all backdrop-blur-md border border-white/10 group/exit shadow-2xl" 
+                    title="Sair da Reprodução"
+                >
+                    <FiChevronLeft size={18} className="group-hover/exit:-translate-x-1 transition-transform" />
+                    <span>Voltar</span>
+                </button>
+            </div>
+
+            {/* Middle Controls Indicator */}
+            {!isBuffering && (
+                <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-4 lg:gap-12 transition-all z-30
+                    ${(showControls) ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                    
+                    {/* Previous */}
+                    <button 
+                        onClick={(e) => { e.stopPropagation(); playPrev(); }} 
+                        onTouchStart={(e) => { e.stopPropagation(); playPrev(); }}
+                        className="w-10 h-10 lg:w-14 lg:h-14 bg-white/5 backdrop-blur-md rounded-full flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 transition-all border border-white/10 active:bg-white/20"
+                    >
+                        <FiSkipBack size={24} />
+                    </button>
+
+                    {/* -10s */}
+                    <button 
+                        onClick={(e) => { e.stopPropagation(); seek(-10); }} 
+                        onTouchStart={(e) => { e.stopPropagation(); seek(-10); }}
+                        className="w-12 h-12 lg:w-16 lg:h-16 bg-white/5 backdrop-blur-md rounded-full flex flex-col items-center justify-center text-white hover:bg-white/10 transition-all active:scale-90 border border-white/10 active:bg-white/20"
+                    >
+                        <FiRotateCcw size={22} />
+                        <span className="text-[10px] font-black mt-1">10</span>
+                    </button>
+
+                    {/* Play/Pause */}
+                    <button 
+                        onClick={(e) => { e.stopPropagation(); togglePlay(); }} 
+                        onTouchStart={(e) => { e.stopPropagation(); togglePlay(); }}
+                        className="w-20 h-20 lg:w-28 lg:h-28 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center text-white hover:scale-110 transition-transform border border-white/20 shadow-2xl active:bg-primary/40"
+                    >
+                        {isPlaying ? <FiPause size={48} /> : <FiPlay size={48} className="ml-2" />}
+                    </button>
+
+                    {/* +10s */}
+                    <button 
+                        onClick={(e) => { e.stopPropagation(); seek(10); }} 
+                        onTouchStart={(e) => { e.stopPropagation(); seek(10); }}
+                        className="w-12 h-12 lg:w-16 lg:h-16 bg-white/5 backdrop-blur-md rounded-full flex flex-col items-center justify-center text-white hover:bg-white/10 transition-all active:scale-90 border border-white/10 active:bg-white/20"
+                    >
+                        <FiRotateCw size={22} />
+                        <span className="text-[10px] font-black mt-1">10</span>
+                    </button>
+
+                    {/* Next */}
+                    <button 
+                        onClick={(e) => { e.stopPropagation(); playNext(); }} 
+                        onTouchStart={(e) => { e.stopPropagation(); playNext(); }}
+                        className="w-10 h-10 lg:w-14 lg:h-14 bg-white/5 backdrop-blur-md rounded-full flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 transition-all border border-white/10 active:bg-white/20"
+                    >
+                        <FiSkipForward size={24} />
+                    </button>
+                </div>
+            )}
+
+            {/* Bottom Controls Overlay */}
+            {(
+                <div className={`absolute bottom-0 left-0 w-full p-4 lg:p-6 bg-gradient-to-t from-black/60 to-transparent transition-opacity duration-300 z-40
+                    ${(showControls) ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+                    
+                    {/* Progress Bar (YouTube style) */}
+                    {duration > 0 && (
+                        <div 
+                            className="group/progress w-full h-1.5 bg-white/20 rounded-full mb-6 relative cursor-pointer hover:h-2 transition-all"
+                            onClick={(e) => {
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                const pos = (e.clientX - rect.left) / rect.width;
+                                videoRef.current.currentTime = pos * duration;
+                            }}
+                        >
+                            <div className="absolute h-full bg-primary rounded-full" style={{ width: `${(currentTime / duration) * 100}%` }}>
+                                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-4 h-4 bg-primary rounded-full scale-0 group-hover/progress:scale-100 transition-transform shadow-lg shadow-primary/50" />
+                            </div>
                         </div>
-                        <h3 className="text-white font-black text-lg mb-2 tracking-tight">Falha na Transmissão</h3>
-                        <p className="text-gray-500 text-[12px] mb-8 leading-relaxed px-4">{error}</p>
-                        <div className="flex flex-col gap-2 max-w-[200px] mx-auto">
-                            <button onClick={init} className="w-full py-3 bg-white text-black rounded-xl font-bold text-xs hover:bg-primary hover:text-white transition-all active:scale-95 shadow-lg">Tentar Novamente</button>
-                            <button onClick={() => setCurrentStream(null)} className="w-full py-3 bg-white/5 text-white/40 rounded-xl font-bold text-[10px] uppercase tracking-widest hover:bg-white/10 hover:text-white transition-all">Fechar Player</button>
+                    )}
+
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-4 lg:gap-8">
+                            <div className="flex items-center gap-2 bg-white/5 hover:bg-white/10 px-3 py-1.5 rounded-xl border border-white/5 transition-all">
+                                <button onClick={() => setIsMuted(!isMuted)} className="text-white hover:text-primary transition-colors">
+                                    {isMuted || volume === 0 ? <FiVolumeX size={20} /> : <FiVolume2 size={20} />}
+                                </button>
+                                <input 
+                                    type="range" 
+                                    min="0" max="1" step="0.1" 
+                                    value={isMuted ? 0 : volume}
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value);
+                                        setVolume(v);
+                                        videoRef.current.volume = v;
+                                        if (v > 0) setIsMuted(false);
+                                    }}
+                                    className="w-20 lg:w-32 transition-all duration-300 accent-primary h-1 cursor-pointer"
+                                />
+                            </div>
+
+                            <span className="text-sm font-bold text-white/90 tracking-tight">
+                                {formatTime(currentTime)} <span className="text-white/40 mx-1">/</span> {duration > 0 ? formatTime(duration) : 'AO VIVO'}
+                            </span>
+                        </div>
+
+                        <div className="flex items-center gap-2 lg:gap-5">
+                            {/* Download */}
+                            <button onClick={handleDownload} className="p-2 text-white/70 hover:text-white transition-all" title="Download">
+                                <FiDownload size={22} />
+                            </button>
+
+                            {/* Speed Selector Removed */}
+
+                            {/* PiP */}
+                            <button onClick={handlePiP} className="p-2 text-white/70 hover:text-white transition-all hidden md:block" title="Picture-in-Picture">
+                                <FiSquare size={22} />
+                            </button>
+
+                            {/* Transmitir (AirPlay / Cast) */}
+                            <button onClick={handleAirPlay} className={`p-2 transition-all ${airplayAvailable ? 'text-primary' : 'text-white/30'}`} title="Transmitir Tela">
+                                <FiAirplay size={22} />
+                            </button>
+
+                            {/* Theater Mode Removed as requested */}
+
+                            {/* Favorites Removed */}
+                            
+                            <button onClick={toggleFullscreen} className="p-2 text-white/70 hover:text-white transition-all" title="Tela Cheia">
+                                <FiMaximize size={22} />
+                            </button>
                         </div>
                     </div>
                 </div>
             )}
-
-            {/* NOVO LAYOUT DE CONTROLES (ESTILO FOTO) - TRANSPARÊNCIA TOTAL */}
-            <div className={`absolute bottom-0 left-0 w-full p-4 lg:p-10 z-50 transition-all duration-700 
-                ${(showControls && !isMinimized) ? 'translate-y-0 opacity-100' : 'translate-y-10 opacity-0 pointer-events-none'}`}>
-                
-
-                {/* 1. LINHA SUPERIOR: NAVEGAÇÃO PRINCIPAL (CENTRALIZADA) */}
-                <div className="flex items-center justify-center max-w-4xl mx-auto mb-4 lg:mb-8">
-                    {/* Bloco Central: Skip, Play, Skip */}
-                    <div className="flex items-center gap-8 lg:gap-16">
-                        <button onClick={playPrev} className="text-white/80 hover:text-white transition-all transform hover:scale-110 active:scale-75">
-                            <FiSkipBack className="w-6 h-6 lg:w-8 lg:h-8" />
-                        </button>
-
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); togglePlay(); }} 
-                            className="text-white/80 hover:text-white transition-all transform hover:scale-110 active:scale-75 flex items-center justify-center"
-                        >
-                            {isPlaying ? <FiPause className="w-10 h-10 lg:w-14 lg:h-14" /> : <FiPlay className="w-10 h-10 lg:w-14 lg:h-14 ml-1 lg:ml-2" />}
-                        </button>
-
-                        <button onClick={playNext} className="text-white/80 hover:text-white transition-all transform hover:scale-110 active:scale-75">
-                            <FiSkipForward className="w-6 h-6 lg:w-8 lg:h-8" />
-                        </button>
-                    </div>
-                </div>
-
-                {/* 2. LINHA CENTRAL: BARRA DE PROGRESSO (VERMELHA) */}
-                <div className="relative group/progress max-w-4xl mx-auto mb-4 lg:mb-8">
-                    {/* Barra de Fundo */}
-                    <div className="h-1 w-full bg-white/10 rounded-full overflow-hidden">
-                        <div 
-                            className="h-full bg-white transition-all duration-150 relative"
-                            style={{ width: `${Number.isFinite(duration) ? (currentTime / (duration || 1)) * 100 : 0}%` }}
-                        >
-                            {/* Ponto Seeker */}
-                            {Number.isFinite(duration) && (
-                                <div className="absolute right-0 top-1/2 -translate-y-1/2 w-4 h-4 bg-white rounded-full shadow-2xl opacity-0 group-hover/progress:opacity-100 transition-opacity" />
-                            )}
-                        </div>
-                    </div>
-                    {/* Scrubbing for Movies/Series */}
-                    {duration > 0 && (
-                        <input 
-                            type="range" min="0" max={duration} step="1" value={currentTime}
-                            onChange={(e) => {
-                                const time = parseFloat(e.target.value);
-                                videoRef.current.currentTime = time;
-                                setCurrentTime(time);
-                            }}
-                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                        />
-                    )}
-                    {/* Time labels para VOD */}
-                    {duration > 0 && Number.isFinite(duration) && (
-                        <div className="flex justify-between mt-2">
-                             <span className="text-[10px] font-bold text-gray-500 tracking-tighter">
-                                {formatTime(currentTime)}
-                             </span>
-                             <span className="text-[10px] font-bold text-gray-500 tracking-tighter">
-                                {formatTime(duration)}
-                             </span>
-                        </div>
-                    )}
-                </div>
-
-                {/* 3. LINHA INFERIOR: AÇÕES EXTRAS (SHARE, COMMENT, DOWNLOAD) */}
-                <div className="flex items-center justify-center gap-4 lg:gap-10">
-                    {/* Controle de Volume Profissional (Movido para Baixo) */}
-                    <div className="hidden lg:flex items-center gap-3 w-32 group/vol mr-4">
-                        <button 
-                            onClick={() => {
-                                if (videoRef.current) {
-                                    videoRef.current.muted = !isMuted;
-                                    setIsMuted(!isMuted);
-                                }
-                            }} 
-                            className="text-white/60 hover:text-white transition-all"
-                        >
-                            {isMuted || volume === 0 ? <FiVolumeX size={16} /> : <FiVolume2 size={16} />}
-                        </button>
-                        <input 
-                            type="range" min="0" max="1" step="0.05" value={isMuted ? 0 : volume}
-                            onChange={(e) => {
-                                const val = parseFloat(e.target.value);
-                                if (videoRef.current) {
-                                    videoRef.current.volume = val;
-                                    setVolume(val);
-                                    if (val > 0) {
-                                        videoRef.current.muted = false;
-                                        setIsMuted(false);
-                                    }
-                                }
-                            }}
-                            className="w-full h-1 bg-white/30 rounded-full appearance-none cursor-pointer accent-white"
-                        />
-                    </div>
-
-
-
-                    <button 
-                        onClick={() => {
-                            const rawUrl = stream.streamUrl || stream.url;
-                            navigator.clipboard.writeText(rawUrl);
-                            toast.success('Link copiado!');
-                        }}
-                        className="flex flex-col items-center gap-1 text-white/60 hover:text-white transition-all group"
-                    >
-                        <FiShare2 size={18} className="group-hover:scale-110 transition-transform" />
-                        <span className="text-[8px] font-black uppercase tracking-[0.2em]">Share</span>
-                    </button>
-
-                    <button 
-                        onClick={() => { setShowComments(!showComments); setShowFullEpg(false); }}
-                        className={`flex flex-col items-center gap-1 transition-all group ${showComments ? 'text-white' : 'text-white/60 hover:text-white'}`}
-                    >
-                        <FiMessageSquare size={18} className="group-hover:scale-110 transition-transform" />
-                        <span className="text-[8px] font-black uppercase tracking-[0.2em]">Comment</span>
-                    </button>
-
-                    <button 
-                        onClick={handleCast}
-                        className="flex flex-col items-center gap-1 text-white/60 hover:text-white transition-all group"
-                    >
-                        <FiAirplay size={18} className="group-hover:scale-110 transition-transform" />
-                        <span className="text-[8px] font-black uppercase tracking-[0.2em]">Cast</span>
-                    </button>
-
-                    <button 
-                        onClick={handleDownload}
-                        className="flex flex-col items-center gap-1 text-white/60 hover:text-white transition-all group"
-                    >
-                        <FiDownload size={18} className="group-hover:scale-110 transition-transform" />
-                        <span className="text-[8px] font-black uppercase tracking-[0.2em]">Download</span>
-                    </button>
-
-                    <button 
-                        onClick={handleFullscreen}
-                        className="flex flex-col items-center gap-1 text-white/60 hover:text-white transition-all group"
-                    >
-                        {isFullscreen ? <FiMinimize2 size={18} className="group-hover:scale-110 transition-transform" /> : <FiMaximize size={18} className="group-hover:scale-110 transition-transform" />}
-                        <span className="text-[8px] font-black uppercase tracking-[0.2em]">{isFullscreen ? 'Sair' : 'Maximize'}</span>
-                    </button>
-
-                    {currentStream?.type === 'series' && (
-                        <button 
-                            onClick={() => { setShowSeasons(!showSeasons); setShowComments(false); setShowFullEpg(false); }}
-                            className={`flex flex-col items-center gap-1 transition-all group ${showSeasons ? 'text-primary' : 'text-white/60 hover:text-white'}`}
-                        >
-                            <FiLayers size={18} className="group-hover:scale-110 transition-transform" />
-                            <span className="text-[8px] font-black uppercase tracking-[0.2em]">Episódios</span>
-                        </button>
-                    )}
-                </div>
-            </div>
-
-            {/* PAINEL DE EPG COMPLETO (GAVETA LATERAL) */}
-            <div className={`absolute top-0 right-0 w-full lg:w-[400px] h-full bg-black/40 backdrop-blur-3xl border-l border-white/10 z-[150] transition-all duration-500 transform ${showFullEpg ? 'translate-x-0' : 'translate-x-full'}`}>
-                <div className="flex flex-col h-full pt-32 pb-20 px-8">
-                    <div className="flex items-center justify-between mb-8">
-                        <div>
-                            <h3 className="text-white font-black text-2xl tracking-tighter uppercase">Programação</h3>
-                            <p className="text-gray-500 text-[10px] font-bold uppercase tracking-widest mt-1">Grade Horária do Canal</p>
-                        </div>
-                        <button onClick={() => setShowFullEpg(false)} className="p-2 text-white/40 hover:text-white transition-all">
-                            <FiX size={24} />
-                        </button>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto custom-scrollbar pr-4 space-y-6">
-                        {epgInfo?.full ? epgInfo.full.map((item, idx) => {
-                            const isCurrent = item.startTime <= new Date() && item.endTime >= new Date();
-                            
-                            return (
-                                <div key={idx} className={`relative p-4 rounded-2xl border transition-all ${isCurrent ? 'bg-white/10 border-white/20 shadow-2xl' : 'bg-transparent border-white/5 opacity-60'}`}>
-                                    <div className="flex justify-between items-start mb-2">
-                                        <span className={`text-[10px] font-black px-2 py-0.5 rounded ${isCurrent ? 'bg-red-600 text-white' : 'bg-white/10 text-gray-400'}`}>
-                                            {item.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                        </span>
-                                        <span className="text-[9px] text-gray-500 font-bold uppercase tracking-widest">
-                                            - {item.endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                        </span>
-                                    </div>
-                                    <h4 className={`font-bold mb-1 ${isCurrent ? 'text-white text-base' : 'text-gray-300 text-sm'}`}>{item.title}</h4>
-                                    <p className="text-[11px] text-gray-500 line-clamp-2 leading-relaxed">{item.description}</p>
-                                    
-                                    {isCurrent && (
-                                        <div className="mt-4 w-full h-0.5 bg-white/5 rounded-full overflow-hidden">
-                                            <div 
-                                                className="h-full bg-white transition-all duration-1000" 
-                                                style={{ 
-                                                    width: `${Math.min(100, Math.max(0, ((new Date() - item.startTime) / (item.endTime - item.startTime)) * 100))}%` 
-                                                }} 
-                                            />
-                                        </div>
-                                    )}
-                                </div>
-                            );
-                        }) : (
-                            <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
-                                <FiClock size={48} className="mb-4" />
-                                <p className="text-sm font-bold uppercase tracking-widest">Nenhuma programação<br/>disponível</p>
-                            </div>
-                        )}
-                    </div>
-                </div>
-            </div>
-
-            {/* PAINEL DE COMENTÁRIOS (GAVETA LATERAL) */}
-            <div className={`absolute top-0 right-0 w-full lg:w-[400px] h-full bg-black/40 backdrop-blur-3xl border-l border-white/10 z-[150] transition-all duration-500 transform ${showComments ? 'translate-x-0' : 'translate-x-full'}`}>
-                <div className="flex flex-col h-full pt-32 pb-20 px-8">
-                    <div className="flex items-center justify-between mb-8">
-                        <div>
-                            <h3 className="text-white font-black text-2xl tracking-tighter uppercase">Comentários</h3>
-                            <p className="text-gray-500 text-[10px] font-bold uppercase tracking-widest mt-1">O que estão dizendo agora</p>
-                        </div>
-                        <button onClick={() => setShowComments(false)} className="p-2 text-white/40 hover:text-white transition-all">
-                            <FiX size={24} />
-                        </button>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto custom-scrollbar pr-4 space-y-6">
-                        {comments.length > 0 ? comments.map((c) => (
-                            <div key={c.id} className="bg-white/5 border border-white/5 p-4 rounded-2xl">
-                                <div className="flex justify-between items-center mb-2">
-                                    <span className="text-[10px] font-black text-primary uppercase">{c.user}</span>
-                                    <span className="text-[9px] text-gray-500">{new Date(c.date).toLocaleTimeString()}</span>
-                                </div>
-                                <p className="text-sm text-gray-200">{c.text}</p>
-                            </div>
-                        )) : (
-                            <div className="h-full flex flex-col items-center justify-center text-center opacity-40">
-                                <FiMessageSquare size={48} className="mb-4" />
-                                <p className="text-sm font-bold uppercase tracking-widest">Seja o primeiro a<br/>comentar!</p>
-                            </div>
-                        )}
-                    </div>
-
-                    <form onSubmit={handleAddComment} className="mt-6 flex gap-2">
-                        <input 
-                            type="text"
-                            value={newComment}
-                            onChange={(e) => setNewComment(e.target.value)}
-                            placeholder="Escreva algo..."
-                            className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-primary/50 transition-all"
-                        />
-                        <button type="submit" className="px-6 py-3 bg-primary text-white font-bold rounded-xl text-sm hover:scale-105 transition-all active:scale-95 shadow-lg shadow-primary/20">
-                            Enviar
-                        </button>
-                    </form>
-                </div>
-            </div>
-
-            {/* PAINEL DE TEMPORADAS E EPISÓDIOS (GAVETA LATERAL) */}
-            <div className={`absolute top-0 right-0 w-full lg:w-[400px] h-full bg-black/40 backdrop-blur-3xl border-l border-white/10 z-[150] transition-all duration-500 transform ${showSeasons ? 'translate-x-0' : 'translate-x-full'}`}>
-                <div className="flex flex-col h-full pt-32 pb-20 px-8">
-                    <div className="flex items-center justify-between mb-8">
-                        <div>
-                            <h3 className="text-white font-black text-2xl tracking-tighter uppercase">Temporadas</h3>
-                            <div className="relative mt-2">
-                                <select 
-                                    value={selectedSeason}
-                                    onChange={(e) => setSelectedSeason(parseInt(e.target.value))}
-                                    className="appearance-none bg-white/5 border border-white/10 rounded-xl px-4 py-2 pr-10 text-sm font-bold text-white focus:outline-none focus:border-primary/50 transition-all cursor-pointer w-full"
-                                >
-                                    {seasons.map(s => (
-                                        <option key={s} value={s} className="bg-surface text-white">Temporada {s}</option>
-                                    ))}
-                                </select>
-                                <FiChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500" />
-                            </div>
-                        </div>
-                        <button onClick={() => setShowSeasons(false)} className="p-2 text-white/40 hover:text-white transition-all">
-                            <FiX size={24} />
-                        </button>
-                    </div>
-
-                    <div className="flex-1 overflow-y-auto custom-scrollbar pr-4 space-y-3">
-                        {episodesBySeason && episodesBySeason[selectedSeason]?.map((ep) => {
-                            const isCurrent = ep.id === currentStream.id;
-                            return (
-                                <button 
-                                    key={ep.id}
-                                    onClick={() => {
-                                        setCurrentStream(ep, playlist);
-                                        if (window.innerWidth < 1024) setShowSeasons(false);
-                                    }}
-                                    className={`flex items-center gap-4 p-4 rounded-2xl border transition-all w-full text-left group/ep ${
-                                        isCurrent 
-                                        ? 'bg-primary border-primary shadow-lg shadow-primary/20' 
-                                        : 'bg-white/5 border-white/5 hover:bg-white/10'
-                                    }`}
-                                >
-                                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-black shrink-0 ${
-                                        isCurrent ? 'bg-white text-primary' : 'bg-white/10 text-primary'
-                                    }`}>
-                                        {ep.order || '•'}
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                        <div className={`font-bold text-sm truncate ${isCurrent ? 'text-white' : 'text-gray-300'}`}>
-                                            {ep.name}
-                                        </div>
-                                        <div className={`text-[9px] font-black uppercase ${isCurrent ? 'text-white/60' : 'text-gray-500'}`}>
-                                            {isCurrent ? 'REPRODUZINDO AGORA' : 'ASSISTIR EPISÓDIO'}
-                                        </div>
-                                    </div>
-                                    <FiPlay className={`transition-all ${isCurrent ? 'text-white' : 'text-gray-600 opacity-0 group-hover/ep:opacity-100'}`} />
-                                </button>
-                            );
-                        })}
-                    </div>
-                </div>
-            </div>
-
         </div>
     );
 }
 
-const styles = `
-    input[type=range]::-webkit-slider-thumb {
-        -webkit-appearance: none;
-        height: 12px;
-        width: 12px;
-        border-radius: 50%;
-        background: #ffffff;
-        cursor: pointer;
-        box-shadow: 0 0 10px rgba(108, 92, 231, 0.5);
-        border: none;
-        margin-top: -4px;
-    }
-    input[type=range]::-moz-range-thumb {
-        height: 12px;
-        width: 12px;
-        border-radius: 50%;
-        background: #ffffff;
-        cursor: pointer;
-        box-shadow: 0 0 10px rgba(108, 92, 231, 0.5);
-        border: none;
-    }
-    input[type=range]::-webkit-slider-runnable-track {
-        width: 100%;
-        height: 4px;
-        cursor: pointer;
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 2px;
-    }
-    input[type=range]::-moz-range-track {
-        width: 100%;
-        height: 4px;
-        cursor: pointer;
-        background: rgba(255, 255, 255, 0.1);
-        border-radius: 2px;
-    }
-    input[type=range]:focus {
-        outline: none;
-    }
-`;
-
-if (typeof document !== 'undefined') {
-    const styleSheet = document.createElement("style");
-    styleSheet.innerText = styles;
-    document.head.appendChild(styleSheet);
+function formatTime(seconds) {
+    if (!seconds || !Number.isFinite(seconds)) return '00:00';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
-
-// Estilos extras para ícones que faltaram

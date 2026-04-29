@@ -8,8 +8,8 @@ import HighlightsPage from './pages/HighlightsPage';
 import SettingsPage from './pages/SettingsPage';
 import AdminPage from './pages/AdminPage';
 import LandingPage from './pages/LandingPage';
+import DashboardPage from './pages/DashboardPage';
 import AuthScreen from './components/Auth/AuthScreen';
-import ResetPasswordPage from './pages/ResetPasswordPage';
 import { useUserStore } from './stores/useUserStore';
 import { usePlaylistStore } from './stores/usePlaylistStore';
 import { useEffect, useState } from 'react';
@@ -22,7 +22,10 @@ import MobileBottomNav from './components/CategorySidebar/MobileBottomNav';
 import { FiPlus } from 'react-icons/fi';
 import { applyTheme } from './hooks/useTheme';
 
-const toasterStyle = { style: { background: '#1E1E1E', color: '#fff', border: '1px solid rgba(255,255,255,0.1)' } };
+const toasterStyle = { 
+    style: { background: '#1E1E1E', color: '#fff', border: '1px solid rgba(255,255,255,0.1)' },
+    duration: 4000,
+};
 
 function App() {
     const { isAuthenticated, init, user } = useUserStore();
@@ -57,9 +60,7 @@ function App() {
         <BrowserRouter>
             {!isAuthenticated ? (
                 <Routes>
-                    <Route path="/" element={<LandingPage />} />
                     <Route path="/login" element={<AuthScreen />} />
-                    <Route path="/reset-password" element={<ResetPasswordPage />} />
                     <Route path="*" element={<LandingPage />} />
                 </Routes>
             ) : (
@@ -72,14 +73,13 @@ function App() {
                 {/* Main Content Area */}
                 <main className="flex-1 w-full h-full overflow-y-auto custom-scrollbar pt-6 pb-24 md:pb-6 px-4 md:px-6 relative z-10 transition-all duration-300">
                     <Routes>
-                        <Route path="/" element={<LiveTvPage />} />
+                        <Route path="/" element={<DashboardPage />} />
                         <Route path="/live-tv" element={<LiveTvPage />} />
                         <Route path="/movies" element={<MoviesPage />} />
                         <Route path="/series" element={<SeriesPage />} />
-                        <Route path="/highlights" element={<HighlightsPage />} />
+                        <Route path="/favorites" element={<FavoritesPage />} />
                         <Route path="/favorites" element={<FavoritesPage />} />
                         <Route path="/settings" element={<SettingsPage />} />
-                        <Route path="/reset-password" element={<ResetPasswordPage />} />
                         {user?.role === 'admin' && (
                             <Route path="/admin" element={<AdminPage />} />
                         )}

@@ -154,6 +154,7 @@ export default function LiveTvPage() {
                     Nenhum canal encontrado para sua busca.
                 </div>
             )}
+
         </div>
     );
 }

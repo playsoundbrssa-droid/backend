@@ -3,34 +3,37 @@
  */
 export const organizeBySeasons = (episodes) => {
     if (!episodes || !Array.isArray(episodes)) return {};
+    
     const seasons = {};
+    console.log(`[SEASON_ORG] Organizando ${episodes.length} episódios.`);
 
     episodes.forEach((ep) => {
         const name = ep.name || '';
         
-        // Prioritize explicit properties if available (some backends/m3u provide them)
+        // Prioridade 1: Metadados explícitos (Xtream ou processados)
         let seasonNum = ep.season || null;
-        let episodeNum = ep.episode || null;
+        let episodeNum = ep.episode || ep.order || null;
 
-        // Extraction using regex if not explicit
-        if (seasonNum === null || episodeNum === null) {
-            // Regex for Season: S01, S1, Season 1, Temporada 1, 1x01
-            const sMatch = name.match(/[sS]\s*(\d+)/) || 
-                          name.match(/(\d+)\s*x/i) || 
-                          name.match(/(?:temporada|season)\s*(\d+)/i);
-            
-            // Regex for Episode: E01, E1, Episode 1, Episódio 1, 1x01
-            const eMatch = name.match(/[eE]\s*(\d+)/) || 
-                          name.match(/x\s*(\d+)/i) || 
-                          name.match(/(?:epis[oó]dio|episode|capitulo|capítulo)\s*(\d+)/i);
+        // Se não tiver metadados, tenta extrair do nome (M3U)
+        if (!seasonNum) {
+            const sMatch = 
+                name.match(/s(\d+)/i) || 
+                name.match(/(\d+)x/i) || 
+                name.match(/temporada\s+(\d+)/i) ||
+                name.match(/t(\d+)/i) || // Suporte a T1, T01
+                name.match(/season\s+(\d+)/i);
 
-            if (sMatch && seasonNum === null) seasonNum = parseInt(sMatch[1]);
-            if (eMatch && episodeNum === null) episodeNum = parseInt(eMatch[1]);
+            const eMatch = 
+                name.match(/e(\d+)/i) || 
+                name.match(/x(\d+)/i) || 
+                name.match(/episódio\s+(\d+)/i) ||
+                name.match(/ep\s*(\d+)/i) ||
+                name.match(/capítulo\s+(\d+)/i) ||
+                name.match(/cap\s*(\d+)/i);
+
+            seasonNum = sMatch ? parseInt(sMatch[1]) : 1;
+            episodeNum = eMatch ? parseInt(eMatch[1]) : 1;
         }
-
-        // Fallback to Season 1 if not found
-        seasonNum = seasonNum || 1;
-        episodeNum = episodeNum || 0;
 
         if (!seasons[seasonNum]) {
             seasons[seasonNum] = [];
@@ -38,14 +41,17 @@ export const organizeBySeasons = (episodes) => {
 
         seasons[seasonNum].push({
             ...ep,
-            order: episodeNum
+            season: seasonNum,
+            episode: episodeNum,
+            order: episodeNum || seasons[seasonNum].length + 1
         });
     });
 
-    // Sort episodes within each season by their order (episode number)
+    // Ordenar episódios dentro de cada temporada
     Object.keys(seasons).forEach(s => {
-        seasons[s].sort((a, b) => (a.order || 0) - (b.order || 0));
+        seasons[s].sort((a, b) => a.order - b.order);
     });
 
+    console.log(`[SEASON_ORG] Resultado: ${Object.keys(seasons).length} temporadas encontradas.`, Object.keys(seasons));
     return seasons;
 };

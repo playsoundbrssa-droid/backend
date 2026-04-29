@@ -4,13 +4,9 @@ import MediaCard from '../components/Media/MediaCard';
 import CategoryFilter from '../components/Media/CategoryFilter';
 import { FiSearch, FiLayers } from 'react-icons/fi';
 import { getSeriesBaseName, getBestSeriesLogo } from '../utils/seriesUtils';
-import { usePlaylistManagerStore } from '../stores/usePlaylistManagerStore';
-import { useProgressStore } from '../stores/useProgressStore';
 
 export default function SeriesPage() {
     const { seriesList, moviesList, seriesGroups, selectedSeriesGroup, setSelectedSeriesGroup } = usePlaylistStore();
-    const { getActivePlaylist } = usePlaylistManagerStore();
-    const { fetchAllProgress } = useProgressStore();
     const [searchTerm, setSearchTerm] = useState('');
     const [debouncedSearch, setDebouncedSearch] = useState('');
     const [visibleCount, setVisibleCount] = useState(50);
@@ -50,65 +46,54 @@ export default function SeriesPage() {
         return () => clearTimeout(timer);
     }, [searchTerm]);
 
-    // Fetch progress on load
-    React.useEffect(() => {
-        const active = getActivePlaylist();
-        if (active) fetchAllProgress(active.id);
-    }, [getActivePlaylist, fetchAllProgress]);
-
     const consolidatedSeries = useMemo(() => {
-        // Unimos as duas listas para garantir que episódios marcados como filmes sejam capturados
-        const baseList = [...(seriesList || []), ...(moviesList || [])];
-        if (baseList.length === 0) return [];
+        if (!seriesList.length && !moviesList.length) return [];
 
-        const seriesMap = {};
+        // 1. Criamos um Set para busca O(1)
+        const seriesIdSet = new Set(seriesList.map(s => s.id));
         
-        // Se houver busca, filtramos antes para performance
-        let filteredList = baseList;
-        if (debouncedSearch) {
-            const lowTerm = debouncedSearch.toLowerCase();
-            filteredList = baseList.filter(s => s.name?.toLowerCase().includes(lowTerm));
-        }
+        // 2. Mapeamos TODA a lista para agrupamento (independente da busca)
+        // Isso garante que o modal de detalhes tenha acesso a todos os episódios
+        const fullList = [...seriesList, ...moviesList];
+        const globalSeriesMap = {};
 
-        filteredList.forEach(item => {
+        fullList.forEach(item => {
             const name = item.name || '';
             const isEpisodePattern = /[sS]\d+|[xX]\d+|\b(temp|ep|cap|season|episode)\b/i.test(name);
-            const isInSeriesList = seriesList?.some(s => s.id === item.id);
-
-            // Só agrupamos se parecer uma série ou se o servidor já disse que é série
-            if (!isEpisodePattern && !isInSeriesList) return;
+            if (!isEpisodePattern && !seriesIdSet.has(item.id)) return;
 
             const baseName = getSeriesBaseName(name);
-            if (!seriesMap[baseName]) {
-                seriesMap[baseName] = { baseName, items: [] };
+            if (!globalSeriesMap[baseName]) {
+                globalSeriesMap[baseName] = [];
             }
-            seriesMap[baseName].items.push(item);
+            globalSeriesMap[baseName].push(item);
         });
 
-        let result = Object.keys(seriesMap).map(name => {
-            const groupData = seriesMap[name];
-            const representative = groupData.items.find(it => {
+        // 3. Geramos o resultado final baseado na busca ou no grupo selecionado
+        const lowTerm = debouncedSearch.toLowerCase();
+        
+        const result = [];
+        for (const [name, items] of Object.entries(globalSeriesMap)) {
+            // Filtro por busca: o nome da série deve conter o termo
+            if (debouncedSearch && !name.toLowerCase().includes(lowTerm)) continue;
+
+            // Filtro por grupo: ao menos um episódio deve pertencer ao grupo
+            if (selectedSeriesGroup && !items.some(ep => ep.group === selectedSeriesGroup)) continue;
+
+            const representative = items.find(it => {
                 if (!it.logo) return false;
                 const lowLogo = it.logo.toLowerCase();
                 return !lowLogo.includes('s0') && !lowLogo.includes('e0') && !lowLogo.includes('thumb');
-            }) || groupData.items[0];
+            }) || items[0];
 
-            return {
+            result.push({
                 ...representative,
                 id: `series_group_${representative.id}`,
                 name: name,
-                logo: getBestSeriesLogo(groupData.items),
-                episodeCount: groupData.items.length,
-                allEpisodes: groupData.items,
+                logo: getBestSeriesLogo(items),
+                episodeCount: items.length,
+                allEpisodes: items, // Agora contém TODOS os episódios globais daquela série
                 type: 'series'
-            };
-        });
-
-        // Se houver um grupo selecionado, filtramos o resultado final
-        if (selectedSeriesGroup) {
-            result = result.filter(s => {
-                // Se a série consolidada tem algum episódio que pertence ao grupo selecionado
-                return s.allEpisodes.some(ep => ep.group === selectedSeriesGroup);
             });
         }
 
@@ -124,14 +109,19 @@ export default function SeriesPage() {
         setVisibleCount(prev => prev + 50);
     };
 
-    if (seriesList.length === 0) {
+    // Debug logs to help identify why it's empty
+    React.useEffect(() => {
+        console.log(`[SeriesPage] Debug: seriesList=${seriesList?.length}, moviesList=${moviesList?.length}, consolidated=${consolidatedSeries?.length}`);
+    }, [seriesList, moviesList, consolidatedSeries]);
+
+    if (seriesList.length === 0 && moviesList.length === 0) {
         return (
             <div className="h-[70vh] flex flex-col items-center justify-center text-center animate-fade-in px-4">
                 <div className="w-20 h-20 bg-white/5 rounded-3xl flex items-center justify-center mb-6 border border-white/10 text-gray-600">
                     <FiLayers size={40} />
                 </div>
                 <h2 className="text-2xl font-bold mb-2">Nenhuma série carregada</h2>
-                <p className="text-gray-500 max-w-xs">Sua playlist atual não contém séries identificadas.</p>
+                <p className="text-gray-500 max-w-xs">Sua playlist atual não contém séries ou filmes que possam ser agrupados.</p>
             </div>
         );
     }
@@ -212,6 +202,7 @@ export default function SeriesPage() {
                     Nenhuma série encontrada para sua busca.
                 </div>
             )}
+
         </div>
     );
 }
