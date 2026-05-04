@@ -158,7 +158,7 @@ exports.importAsPlaylist = async (serverUrl, username, password) => {
                 const base = serverUrl.replace(/\/$/, '');
                 let streamUrl = '';
                 
-                // Live TV: Adicionamos .ts para forçar detecção correta no player
+                // Live TV: Restaurado o .ts pois a maioria dos painéis XTREAM exige a extensão para Live streams, caso contrário retornam 404
                 if (type === 'live') {
                     streamUrl = `${base}/${username}/${password}/${streamId}.ts`;
                 } 
