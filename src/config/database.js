@@ -13,8 +13,10 @@ if (isPostgres) {
     });
 } else {
     const sqlite3 = require('sqlite3').verbose();
-    const dataDir = path.join(__dirname, '../../data');
-    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
+    const dataDir = process.env.ELECTRON_USER_DATA_PATH 
+        ? path.join(process.env.ELECTRON_USER_DATA_PATH, 'data')
+        : path.join(__dirname, '../../data');
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
     db = new sqlite3.Database(path.join(dataDir, 'database.sqlite'));
 }
 

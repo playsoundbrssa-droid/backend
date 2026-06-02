@@ -342,6 +342,12 @@ router.get('/image', async (req, res) => {
 
 router.get('/download', async (req, res) => {
     try {
+        const User = require('../models/User');
+        const user = await User.findByPk(req.userId);
+        if (!user || (!user.canDownload && user.role !== 'admin')) {
+            return res.status(403).json({ error: 'Download não autorizado pelo administrador.' });
+        }
+
         const targetUrl = req.query.url;
         let filename = req.query.filename || 'media-download';
 

@@ -20,8 +20,9 @@ const User = {
         
         // Normaliza campos para compatibilidade Postgres/SQLite
         const user = res.rows[0];
-        if (user.isactive !== undefined) user.isActive = user.isactive;
-        if (user.can_download !== undefined) user.canDownload = !!user.can_download;
+        user.isActive = user.isactive !== undefined ? !!user.isactive : !!user.isActive;
+        user.canDownload = user.can_download !== undefined ? !!user.can_download : !!user.canDownload;
+        user.can_download = user.canDownload;
         user.lastActivePlaylistId = user.last_active_playlist_id || user.lastactiveplaylistid;
         return user;
     },
@@ -31,8 +32,9 @@ const User = {
         if (!res.rows[0]) return null;
         
         const user = res.rows[0];
-        if (user.isactive !== undefined) user.isActive = user.isactive;
-        if (user.can_download !== undefined) user.canDownload = !!user.can_download;
+        user.isActive = user.isactive !== undefined ? !!user.isactive : !!user.isActive;
+        user.canDownload = user.can_download !== undefined ? !!user.can_download : !!user.canDownload;
+        user.can_download = user.canDownload;
         user.lastActivePlaylistId = user.last_active_playlist_id || user.lastactiveplaylistid;
         return user;
     },
@@ -84,7 +86,14 @@ const User = {
         }
 
         const res = await db.query(formatQuery(sql), params);
-        return res.rows;
+        const rows = res.rows || [];
+        return rows.map(user => {
+            user.isActive = user.isactive !== undefined ? !!user.isactive : !!user.isActive;
+            user.canDownload = user.can_download !== undefined ? !!user.can_download : !!user.canDownload;
+            user.can_download = user.canDownload;
+            user.lastActivePlaylistId = user.last_active_playlist_id || user.lastactiveplaylistid;
+            return user;
+        });
     },
 
     destroy: async (criteria) => {

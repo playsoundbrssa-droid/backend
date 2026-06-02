@@ -43,7 +43,9 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Ensure data directory exists
-const dataDir = path.join(__dirname, '../data');
+const dataDir = process.env.ELECTRON_USER_DATA_PATH 
+    ? path.join(process.env.ELECTRON_USER_DATA_PATH, 'data')
+    : path.join(__dirname, '../data');
 if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
 }

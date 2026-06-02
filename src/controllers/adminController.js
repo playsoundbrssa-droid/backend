@@ -87,9 +87,9 @@ exports.toggleDownload = async (req, res) => {
             return res.status(404).json({ message: 'Usuário não encontrado.' });
         }
 
-        const newStatus = !user.can_download;
+        const newStatus = !user.canDownload;
         await User.update({ can_download: newStatus }, { where: { id: user.id } });
-        res.json({ message: `Download ${newStatus ? 'liberado' : 'bloqueado'} para ${user.name}.`, user: { id: user.id, can_download: newStatus } });
+        res.json({ message: `Download ${newStatus ? 'liberado' : 'bloqueado'} para ${user.name}.`, user: { id: user.id, can_download: newStatus, canDownload: newStatus } });
     } catch (error) {
         console.error('[ADMIN] Erro ao alterar permissão de download:', error);
         res.status(500).json({ message: 'Erro interno.' });
