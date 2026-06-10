@@ -359,15 +359,27 @@ router.get('/download', async (req, res) => {
             return res.status(403).json({ error: 'Security block' });
         }
 
+        // Sanitizar URL - remover espaços extras e garantir que o # não quebre a requisição
+        let finalTarget = targetUrl.trim().replace(/#/g, '%23');
+
         // Limpar nome do arquivo para evitar problemas de header
         filename = filename.replace(/[/\\?%*:|"<>]/g, '-');
 
         const response = await axios({
             method: 'GET',
-            url: targetUrl,
+            url: finalTarget,
             responseType: 'stream',
-            headers: { 'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18', 'Accept': '*/*' },
-            timeout: 60000 // Aumentar timeout para downloads
+            ...proxyAgents,
+            headers: { 
+                'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18', 
+                'Accept': '*/*',
+                'Accept-Encoding': 'identity',
+                'Connection': 'keep-alive',
+                'X-Forwarded-For': '1.1.1.1'
+            },
+            timeout: 120000, // Aumentar timeout para downloads grandes
+            maxRedirects: 10,
+            validateStatus: (status) => status < 400
         });
 
         // Tentar detectar extensão se não fornecida
